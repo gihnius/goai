@@ -56,6 +56,10 @@ type RequestConfig struct {
 	// IncludeReasoningContent controls serialization of the non-standard
 	// reasoning_content field. Providers must opt in when their API requires it.
 	IncludeReasoningContent bool
+
+	// UsesCompletionTokens forces the max_tokens / max_completion_tokens choice
+	// instead of deriving it from modelID. Nil keeps the modelID heuristic.
+	UsesCompletionTokens *bool
 }
 
 // BuildRequest creates a standard OpenAI chat/completions request body.
@@ -216,7 +220,13 @@ func BuildRequest(params provider.GenerateParams, modelID string, streaming bool
 	// reasoning model rejects max_tokens outright (Azure gpt-5 returns
 	// `Unsupported parameter: 'max_tokens'`) whether or not the caller
 	// passed a reasoning_effort.
-	if IsReasoningModel(modelID) {
+	// The caller may know what the model id cannot tell (Azure: the id is the
+	// deployment name); nil falls back to the id heuristic.
+	usesCompletionTokens := IsReasoningModel(modelID)
+	if cfg.UsesCompletionTokens != nil {
+		usesCompletionTokens = *cfg.UsesCompletionTokens
+	}
+	if usesCompletionTokens {
 		if v, ok := body["max_tokens"]; ok {
 			body["max_completion_tokens"] = v
 			delete(body, "max_tokens")
