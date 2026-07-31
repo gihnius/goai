@@ -2207,6 +2207,31 @@ func TestParseResponsesResult_ReasoningEncryptedContent(t *testing.T) {
 	}
 }
 
+func TestParseResponsesResult_ReasoningEmptySummaryPreservesReplayState(t *testing.T) {
+	body := `{
+		"id": "resp-1",
+		"model": "o3",
+		"status": "completed",
+		"output": [{"type": "reasoning", "id": "rs-1", "encrypted_content": "opaque-state", "summary": []}]
+	}`
+
+	result, err := parseResponsesResult([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ReasoningParts) != 1 || result.ReasoningParts[0].Text != "" {
+		t.Fatalf("ReasoningParts = %#v", result.ReasoningParts)
+	}
+	input, ok := reasoningInputItem(result.ReasoningParts[0])
+	if !ok {
+		t.Fatal("encrypted reasoning state was not replayable")
+	}
+	summary, ok := input["summary"].([]map[string]any)
+	if !ok || len(summary) != 0 {
+		t.Fatalf("summary = %#v, want empty array", input["summary"])
+	}
+}
+
 func TestConvertToResponsesInput_ReasoningEncryptedContent(t *testing.T) {
 	input := convertToResponsesInput([]provider.Message{{
 		Role:    provider.RoleAssistant,
@@ -2220,6 +2245,19 @@ func TestConvertToResponsesInput_ReasoningEncryptedContent(t *testing.T) {
 	}
 	if got := input[0]["summary"].([]map[string]any)[0]["text"]; got != "think" {
 		t.Errorf("summary text = %v, want think", got)
+	}
+}
+
+func TestConvertToResponsesInput_ReasoningEncryptedContentWithEmptySummary(t *testing.T) {
+	input := convertToResponsesInput([]provider.Message{{
+		Role:    provider.RoleAssistant,
+		Content: []provider.Part{openAIReasoningPart("rs-1", "", "opaque-state")},
+	}})
+	if len(input) != 1 {
+		t.Fatalf("input length = %d, want 1", len(input))
+	}
+	if summary, ok := input[0]["summary"].([]map[string]any); !ok || len(summary) != 0 {
+		t.Fatalf("summary = %#v, want empty array", input[0]["summary"])
 	}
 }
 
