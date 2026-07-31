@@ -189,6 +189,11 @@ type GenerateResult struct {
 	// provider does not return reasoning or thinking is disabled.
 	Reasoning string
 
+	// ReasoningParts preserves provider-native reasoning blocks for replay.
+	// It is optional; providers that only expose aggregate reasoning may leave
+	// it nil and continue using Reasoning.
+	ReasoningParts []Part
+
 	// ToolCalls requested by the model.
 	ToolCalls []ToolCall
 

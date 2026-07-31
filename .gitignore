@@ -32,4 +32,5 @@ testdata/
 .vibeflow
 *.out
 docs/drift-report
+docs/issue-fixes-review/
 .pr-bodies/
