@@ -46,6 +46,9 @@ func buildResponsesRequest(params provider.GenerateParams, modelID string, strea
 
 	// Messages → Responses API "input" format.
 	body["input"] = convertToResponsesInput(params.Messages)
+	if auto, ok := params.ProviderOptions["goaiAutoPreviousResponseID"].(bool); ok && auto {
+		body["input"] = convertAutoContinuationInput(params.Messages)
+	}
 
 	if params.MaxOutputTokens > 0 {
 		body["max_output_tokens"] = params.MaxOutputTokens
@@ -168,9 +171,10 @@ func applyResponsesProviderOptions(body map[string]any, opts map[string]any) {
 
 	// Known options that should NOT be passed through to the body directly.
 	consumed := map[string]bool{
-		"structuredOutputs": true,
-		"strictJsonSchema":  true,
-		"useResponsesAPI":   true,
+		"structuredOutputs":          true,
+		"strictJsonSchema":           true,
+		"useResponsesAPI":            true,
+		"goaiAutoPreviousResponseID": true,
 	}
 
 	// Item 2: store from ProviderOptions (no longer hardcoded false).
@@ -336,13 +340,17 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 		case provider.RoleAssistant:
 			var items []map[string]any
 			var textParts []string
+			hasReasoningItem := false
 
 			for _, part := range msg.Content {
 				switch part.Type {
 				case provider.PartText:
 					textParts = append(textParts, part.Text)
 				case provider.PartReasoning:
-					if part.Text != "" {
+					if item, ok := reasoningInputItem(part); ok {
+						items = append(items, item)
+						hasReasoningItem = true
+					} else if part.Text != "" {
 						textParts = append(textParts, part.Text)
 					}
 				case provider.PartToolCall:
@@ -363,14 +371,19 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 			}
 
 			if len(textParts) > 0 {
-				items = append([]map[string]any{{
+				message := map[string]any{
 					"type": "message",
 					"role": "assistant",
 					"content": []map[string]any{{
 						"type": "output_text",
 						"text": strings.Join(textParts, "\n"),
 					}},
-				}}, items...)
+				}
+				if hasReasoningItem {
+					items = append(items, message)
+				} else {
+					items = append([]map[string]any{message}, items...)
+				}
 			}
 
 			result = append(result, items...)
@@ -422,6 +435,38 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 	return result
 }
 
+func convertAutoContinuationInput(msgs []provider.Message) []map[string]any {
+	var toolMessages []provider.Message
+	for i := len(msgs) - 1; i >= 0 && msgs[i].Role == provider.RoleTool; i-- {
+		toolMessages = append(toolMessages, msgs[i])
+	}
+	slices.Reverse(toolMessages)
+	return convertToResponsesInput(toolMessages)
+}
+
+func reasoningInputItem(part provider.Part) (map[string]any, bool) {
+	openAI, ok := part.ProviderOptions["openai"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	itemID, _ := openAI["itemId"].(string)
+	encryptedContent, _ := openAI["encryptedContent"].(string)
+	if itemID == "" && encryptedContent == "" {
+		return nil, false
+	}
+	item := map[string]any{"type": "reasoning"}
+	if itemID != "" {
+		item["id"] = itemID
+	}
+	if encryptedContent != "" {
+		item["encrypted_content"] = encryptedContent
+	}
+	if part.Text != "" {
+		item["summary"] = []map[string]any{{"type": "summary_text", "text": part.Text}}
+	}
+	return item, true
+}
+
 func partsToText(parts []provider.Part) string {
 	var texts []string
 	for _, p := range parts {
@@ -449,6 +494,30 @@ type responsesReasoning struct {
 	// lastSummary is the summary_index of the previous delta, or -1 before the
 	// first one. Segments are only delimited by that index, never by the text.
 	lastSummary int
+}
+
+func activeReasoningForEvent(active map[int]*responsesReasoning, current int, itemID string) (int, *responsesReasoning) {
+	for index, reasoning := range active {
+		if reasoning.canonicalID == itemID {
+			return index, reasoning
+		}
+	}
+	if reasoning, ok := active[current]; ok {
+		return current, reasoning
+	}
+	return -1, nil
+}
+
+func openAIReasoningPart(itemID, text, encryptedContent string) provider.Part {
+	openAI := map[string]any{"itemId": itemID}
+	if encryptedContent != "" {
+		openAI["encryptedContent"] = encryptedContent
+	}
+	return provider.Part{
+		Type:            provider.PartReasoning,
+		Text:            text,
+		ProviderOptions: map[string]any{"openai": openAI},
+	}
 }
 
 // summarySeparator delimits consecutive reasoning summaries. Their boundary
@@ -526,16 +595,14 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
 				// Use canonical ID from activeReasoning if available.
 				id, text := ev.ItemID, ev.Delta
-				if currentReasoningIdx >= 0 {
-					if ar := activeReasoning[currentReasoningIdx]; ar != nil {
-						id = ar.canonicalID
-						// A new summary_index opens a separate summary: carry the
-						// boundary in the text, since the deltas never bring it.
-						if ar.lastSummary >= 0 && ev.SummaryIndex != ar.lastSummary {
-							text = summarySeparator + text
-						}
-						ar.lastSummary = ev.SummaryIndex
+				if idx, ar := activeReasoningForEvent(activeReasoning, currentReasoningIdx, ev.ItemID); idx >= 0 {
+					id = ar.canonicalID
+					// A new summary_index opens a separate summary: carry the
+					// boundary in the text, since the deltas never bring it.
+					if ar.lastSummary >= 0 && ev.SummaryIndex != ar.lastSummary {
+						text = summarySeparator + text
 					}
+					ar.lastSummary = ev.SummaryIndex
 				}
 				if !provider.TrySend(ctx, out, provider.StreamChunk{
 					Type: provider.ChunkReasoning,
@@ -645,6 +712,33 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 				_ = json.Unmarshal(ev.Item, &itemHead)
 				switch itemHead.Type {
 				case "reasoning":
+					var item struct {
+						ID               string `json:"id"`
+						EncryptedContent string `json:"encrypted_content"`
+					}
+					_ = json.Unmarshal(ev.Item, &item)
+					if active := activeReasoning[ev.OutputIndex]; active != nil && item.EncryptedContent != "" {
+						id := active.canonicalID
+						if id == "" {
+							id = item.ID
+						}
+						index := active.lastSummary
+						if index < 0 {
+							index = 0
+						}
+						if !provider.TrySend(ctx, out, provider.StreamChunk{
+							Type: provider.ChunkReasoning,
+							Metadata: map[string]any{
+								"reasoningId": fmt.Sprintf("%s:%d", id, index),
+								"openai": map[string]any{
+									"itemId":           id,
+									"encryptedContent": item.EncryptedContent,
+								},
+							},
+						}) {
+							return
+						}
+					}
 					delete(activeReasoning, ev.OutputIndex)
 					if currentReasoningIdx == ev.OutputIndex {
 						currentReasoningIdx = -1
@@ -695,14 +789,14 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 		case "response.completed", "response.incomplete":
 			var ev struct {
 				Response struct {
-					ID    string `json:"id"`
-					Model string `json:"model"`
+					ID                string `json:"id"`
+					Model             string `json:"model"`
 					IncompleteDetails *struct {
 						Reason string `json:"reason"`
 					} `json:"incomplete_details"`
 					Usage struct {
-						InputTokens  int `json:"input_tokens"`
-						OutputTokens int `json:"output_tokens"`
+						InputTokens         int `json:"input_tokens"`
+						OutputTokens        int `json:"output_tokens"`
 						OutputTokensDetails *struct {
 							ReasoningTokens int `json:"reasoning_tokens"`
 						} `json:"output_tokens_details"`
@@ -862,10 +956,10 @@ type responsesResult struct {
 		Type    string `json:"type"`
 		Role    string `json:"role"`
 		Content []struct {
-			Type        string              `json:"type"`
-			Text        string              `json:"text"`
+			Type        string                `json:"type"`
+			Text        string                `json:"text"`
 			Annotations []responsesAnnotation `json:"annotations,omitempty"`
-			Logprobs    *json.RawMessage    `json:"logprobs,omitempty"`
+			Logprobs    *json.RawMessage      `json:"logprobs,omitempty"`
 		} `json:"content,omitempty"`
 
 		// function_call fields
@@ -874,16 +968,17 @@ type responsesResult struct {
 		Arguments string `json:"arguments,omitempty"`
 
 		// reasoning fields
-		ID      string `json:"id,omitempty"`
-		Summary []struct {
+		ID               string `json:"id,omitempty"`
+		EncryptedContent string `json:"encrypted_content,omitempty"`
+		Summary          []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"summary,omitempty"`
 	} `json:"output"`
 
 	Usage *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens         int `json:"input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
 		OutputTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"output_tokens_details,omitempty"`
@@ -945,6 +1040,7 @@ func parseResponsesResult(body []byte) (*provider.GenerateResult, error) {
 	// Extract text, tool calls, sources, logprobs from output.
 	var textParts []string
 	var reasoningParts []string
+	var reasoningItems []provider.Part
 	var hasFunctionCall bool
 	providerMeta := map[string]any{}
 	var allLogprobs []any
@@ -984,15 +1080,20 @@ func parseResponsesResult(body []byte) (*provider.GenerateResult, error) {
 				Input: json.RawMessage(item.Arguments),
 			})
 		case "reasoning":
+			var itemText []string
 			for _, s := range item.Summary {
 				if s.Text != "" {
 					reasoningParts = append(reasoningParts, s.Text)
+					itemText = append(itemText, s.Text)
 					reasoning, _ := providerMeta["reasoning"].([]map[string]any)
 					providerMeta["reasoning"] = append(reasoning, map[string]any{
 						"type": s.Type,
 						"text": s.Text,
 					})
 				}
+			}
+			if len(itemText) > 0 || item.EncryptedContent != "" {
+				reasoningItems = append(reasoningItems, openAIReasoningPart(item.ID, strings.Join(itemText, summarySeparator), item.EncryptedContent))
 			}
 		default:
 			if isServerExecutedItem(item.Type) && i < len(rawOutput.Output) {
@@ -1020,6 +1121,7 @@ func parseResponsesResult(body []byte) (*provider.GenerateResult, error) {
 	// Each entry is a distinct summary; joining them bare merges the markdown
 	// at the seam, same as in the streaming path.
 	result.Reasoning = strings.Join(reasoningParts, summarySeparator)
+	result.ReasoningParts = reasoningItems
 
 	if len(allLogprobs) > 0 {
 		providerMeta["logprobs"] = allLogprobs

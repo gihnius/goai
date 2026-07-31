@@ -43,6 +43,228 @@ func streamFromChunks(chunks ...provider.StreamChunk) *provider.StreamResult {
 	return &provider.StreamResult{Stream: ch}
 }
 
+func TestDrainStep_PreservesDistinctReasoningBlocks(t *testing.T) {
+	source := make(chan provider.StreamChunk, 8)
+	source <- provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"reasoningId": "r1:0"}}
+	source <- provider.StreamChunk{Type: provider.ChunkReasoning, Metadata: map[string]any{"reasoningId": "r1:0", "signature": "sig-1"}}
+	source <- provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"reasoningId": "r2:0", "signature": "sig-2"}}
+	source <- provider.StreamChunk{Type: provider.ChunkFinish, FinishReason: provider.FinishStop}
+	close(source)
+	out := make(chan provider.StreamChunk, 8)
+
+	result := drainStep(context.Background(), source, out)
+	if len(result.reasoning) != 2 {
+		t.Fatalf("reasoning blocks = %d, want 2", len(result.reasoning))
+	}
+	if result.reasoning[0].Text != "first" || result.reasoning[1].Text != "second" {
+		t.Errorf("reasoning text = %#v", result.reasoning)
+	}
+	if result.reasoning[0].ProviderOptions["signature"] != "sig-1" || result.reasoning[1].ProviderOptions["signature"] != "sig-2" {
+		t.Errorf("reasoning metadata = %#v", result.reasoning)
+	}
+}
+
+func TestReasoningAccumulator_FlushesOnSignatureChange(t *testing.T) {
+	var acc reasoningAccumulator
+	acc.add(provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"signature": "sig-1"}})
+	acc.add(provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"signature": "sig-2"}})
+	parts := acc.finish()
+	if len(parts) != 2 || parts[0].Text != "first" || parts[1].Text != "second" {
+		t.Fatalf("parts = %#v, want two signature-bound blocks", parts)
+	}
+}
+
+func TestReasoningAccumulator_UsesExplicitBlockID(t *testing.T) {
+	var acc reasoningAccumulator
+	acc.add(provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"blockId": "a"}})
+	acc.add(provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"blockId": "b"}})
+	parts := acc.finish()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %#v, want two explicit blocks", parts)
+	}
+}
+
+func TestReasoningAccumulator_KeyAndSignaturePresenceTransitions(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  provider.StreamChunk
+		second provider.StreamChunk
+	}{
+		{
+			name:   "unkeyed to keyed",
+			first:  provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first"},
+			second: provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"blockId": "b"}},
+		},
+		{
+			name:   "keyed to unkeyed",
+			first:  provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"blockId": "a"}},
+			second: provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second"},
+		},
+		{
+			name:   "signed to unsigned",
+			first:  provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"signature": "sig"}},
+			second: provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second"},
+		},
+		{
+			name:   "unsigned to signed",
+			first:  provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first"},
+			second: provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"signature": "sig"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var acc reasoningAccumulator
+			acc.add(tt.first)
+			acc.add(tt.second)
+			parts := acc.finish()
+			if len(parts) != 2 || parts[0].Text != "first" || parts[1].Text != "second" {
+				t.Fatalf("parts = %#v, want two blocks", parts)
+			}
+		})
+	}
+}
+
+func TestSetPreviousResponseID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		opts map[string]any
+		want any
+	}{
+		{name: "responses id", id: "resp_123", want: "resp_123"},
+		{name: "non responses id", id: "msg_123", want: nil},
+		{name: "store false", id: "resp_123", opts: map[string]any{"store": false}, want: nil},
+		{name: "explicit camel case", id: "resp_123", opts: map[string]any{"previousResponseId": "manual"}, want: "manual"},
+		{name: "explicit wire key", id: "resp_123", opts: map[string]any{"previous_response_id": "manual"}, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := provider.GenerateParams{ProviderOptions: tt.opts}
+			setPreviousResponseID(&params, provider.ResponseMetadata{ID: tt.id})
+			if got := params.ProviderOptions["previousResponseId"]; got != tt.want {
+				t.Errorf("previousResponseId = %v, want %v", got, tt.want)
+			}
+			if tt.name == "explicit wire key" && params.ProviderOptions["previous_response_id"] != "manual" {
+				t.Errorf("explicit wire option was changed: %#v", params.ProviderOptions)
+			}
+		})
+	}
+}
+
+func TestGenerateText_ToolLoopPropagatesPreviousResponseID(t *testing.T) {
+	var calls int
+	var secondOptions map[string]any
+	model := &mockModel{id: "responses", generateFn: func(_ context.Context, params provider.GenerateParams) (*provider.GenerateResult, error) {
+		calls++
+		if calls == 2 {
+			secondOptions = params.ProviderOptions
+			return &provider.GenerateResult{Text: "done", FinishReason: provider.FinishStop, Response: provider.ResponseMetadata{ID: "resp_456"}}, nil
+		}
+		return &provider.GenerateResult{
+			ToolCalls:    []provider.ToolCall{{ID: "call-1", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			FinishReason: provider.FinishToolCalls,
+			Response:     provider.ResponseMetadata{ID: "resp_123"},
+		}, nil
+	}}
+
+	_, err := GenerateText(t.Context(), model,
+		WithPrompt("lookup"), WithMaxSteps(3),
+		WithTools(Tool{Name: "lookup", Execute: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondOptions["previousResponseId"] != "resp_123" {
+		t.Fatalf("second request options = %#v", secondOptions)
+	}
+}
+
+func TestStreamText_ToolLoopPropagatesPreviousResponseID(t *testing.T) {
+	var calls int
+	var secondOptions map[string]any
+	model := &mockModel{id: "responses", streamFn: func(_ context.Context, params provider.GenerateParams) (*provider.StreamResult, error) {
+		calls++
+		if calls == 2 {
+			secondOptions = params.ProviderOptions
+			return streamFromChunks(
+				provider.StreamChunk{Type: provider.ChunkText, Text: "done"},
+				provider.StreamChunk{Type: provider.ChunkFinish, FinishReason: provider.FinishStop, Response: provider.ResponseMetadata{ID: "resp_456"}},
+			), nil
+		}
+		return streamFromChunks(
+			provider.StreamChunk{Type: provider.ChunkToolCall, ToolCallID: "call-1", ToolName: "lookup", ToolInput: `{}`},
+			provider.StreamChunk{Type: provider.ChunkFinish, FinishReason: provider.FinishToolCalls, Response: provider.ResponseMetadata{ID: "resp_123"}},
+		), nil
+	}}
+
+	stream, err := StreamText(t.Context(), model,
+		WithPrompt("lookup"), WithMaxSteps(3),
+		WithTools(Tool{Name: "lookup", Execute: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range stream.Stream() {
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if secondOptions["previousResponseId"] != "resp_123" {
+		t.Fatalf("second request options = %#v", secondOptions)
+	}
+}
+
+func TestGenerateText_ResponseMessagesPreserveReasoningParts(t *testing.T) {
+	model := &mockModel{id: "responses", generateFn: func(context.Context, provider.GenerateParams) (*provider.GenerateResult, error) {
+		return &provider.GenerateResult{
+			Text:      "answer",
+			Reasoning: "think",
+			ReasoningParts: []provider.Part{{
+				Type: provider.PartReasoning,
+				Text: "think",
+				ProviderOptions: map[string]any{
+					"openai": map[string]any{"itemId": "rs-1", "encryptedContent": "opaque"},
+				},
+			}},
+			FinishReason: provider.FinishStop,
+		}, nil
+	}}
+	result, err := GenerateText(t.Context(), model, WithPrompt("answer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ResponseMessages) != 1 || len(result.ResponseMessages[0].Content) != 2 {
+		t.Fatalf("ResponseMessages = %#v", result.ResponseMessages)
+	}
+	if result.ResponseMessages[0].Content[0].ProviderOptions["openai"].(map[string]any)["encryptedContent"] != "opaque" {
+		t.Fatalf("reasoning part lost metadata: %#v", result.ResponseMessages[0].Content[0])
+	}
+}
+
+func TestStreamText_ResponseMessagesPreserveReasoningBlocks(t *testing.T) {
+	model := &mockModel{id: "responses", streamFn: func(context.Context, provider.GenerateParams) (*provider.StreamResult, error) {
+		return streamFromChunks(
+			provider.StreamChunk{Type: provider.ChunkReasoning, Text: "first", Metadata: map[string]any{"reasoningId": "r1:0"}},
+			provider.StreamChunk{Type: provider.ChunkReasoning, Text: "second", Metadata: map[string]any{"reasoningId": "r2:0"}},
+			provider.StreamChunk{Type: provider.ChunkText, Text: "answer"},
+			provider.StreamChunk{Type: provider.ChunkFinish, FinishReason: provider.FinishStop},
+		), nil
+	}}
+	stream, err := StreamText(t.Context(), model, WithPrompt("answer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range stream.Stream() {
+	}
+	result := stream.Result()
+	if len(result.ResponseMessages) != 1 || len(result.ResponseMessages[0].Content) != 3 {
+		t.Fatalf("ResponseMessages = %#v", result.ResponseMessages)
+	}
+	if result.ResponseMessages[0].Content[0].Text != "first" || result.ResponseMessages[0].Content[1].Text != "second" {
+		t.Fatalf("reasoning blocks = %#v", result.ResponseMessages[0].Content)
+	}
+}
+
 // --- StreamText tests ---
 
 func TestStreamText_Stream(t *testing.T) {
@@ -1117,8 +1339,8 @@ func TestGenerateText_ToolLoop_ServerTool(t *testing.T) {
 		WithPrompt("weather in Singapore?"),
 		WithMaxSteps(3),
 		WithTools(Tool{
-			Name:               "web_search",
-			Description:        "Search the web",
+			Name:                "web_search",
+			Description:         "Search the web",
 			ProviderDefinedType: "openrouter:web_search",
 		}),
 	)
@@ -2506,8 +2728,8 @@ func TestStreamText_ToolLoop_ServerTool(t *testing.T) {
 		WithPrompt("weather?"),
 		WithMaxSteps(3),
 		WithTools(Tool{
-			Name:               "web_search",
-			Description:        "Search the web",
+			Name:                "web_search",
+			Description:         "Search the web",
 			ProviderDefinedType: "openrouter:web_search",
 		}),
 	)

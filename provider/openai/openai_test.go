@@ -2183,6 +2183,165 @@ func TestParseResponsesResult_ReasoningSummary(t *testing.T) {
 	}
 }
 
+func TestParseResponsesResult_ReasoningEncryptedContent(t *testing.T) {
+	body := `{
+		"id": "resp-1",
+		"model": "o3",
+		"status": "completed",
+		"output": [{"type": "reasoning", "id": "rs-1", "encrypted_content": "opaque-state", "summary": [{"type": "summary_text", "text": "think"}]}]
+	}`
+
+	result, err := parseResponsesResult([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ReasoningParts) != 1 {
+		t.Fatalf("ReasoningParts = %d, want 1", len(result.ReasoningParts))
+	}
+	openAI, ok := result.ReasoningParts[0].ProviderOptions["openai"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing openai reasoning metadata: %#v", result.ReasoningParts[0].ProviderOptions)
+	}
+	if openAI["itemId"] != "rs-1" || openAI["encryptedContent"] != "opaque-state" {
+		t.Errorf("reasoning metadata = %#v", openAI)
+	}
+}
+
+func TestConvertToResponsesInput_ReasoningEncryptedContent(t *testing.T) {
+	input := convertToResponsesInput([]provider.Message{{
+		Role:    provider.RoleAssistant,
+		Content: []provider.Part{openAIReasoningPart("rs-1", "think", "opaque-state")},
+	}})
+	if len(input) != 1 {
+		t.Fatalf("input length = %d, want 1", len(input))
+	}
+	if input[0]["type"] != "reasoning" || input[0]["id"] != "rs-1" || input[0]["encrypted_content"] != "opaque-state" {
+		t.Errorf("reasoning input = %#v", input[0])
+	}
+	if got := input[0]["summary"].([]map[string]any)[0]["text"]; got != "think" {
+		t.Errorf("summary text = %v, want think", got)
+	}
+}
+
+func TestReasoningInputItem_RequiresOpenAIState(t *testing.T) {
+	for name, part := range map[string]provider.Part{
+		"missing provider metadata": {Type: provider.PartReasoning, Text: "think"},
+		"empty openai metadata":     {Type: provider.PartReasoning, ProviderOptions: map[string]any{"openai": map[string]any{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if item, ok := reasoningInputItem(part); ok || item != nil {
+				t.Fatalf("reasoningInputItem() = %#v, %v; want nil, false", item, ok)
+			}
+		})
+	}
+}
+
+func TestBuildResponsesRequest_AutoContinuationInput(t *testing.T) {
+	body := buildResponsesRequest(provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "original"}}},
+			{Role: provider.RoleAssistant, Content: []provider.Part{{Type: provider.PartToolCall, ToolCallID: "call-1", ToolName: "lookup", ToolInput: json.RawMessage(`{}`)}}},
+			{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-1", ToolOutput: "result"}}},
+		},
+		ProviderOptions: map[string]any{
+			"previousResponseId":         "resp-1",
+			"goaiAutoPreviousResponseID": true,
+		},
+	}, "o3", false)
+	input := body["input"].([]map[string]any)
+	if len(input) != 1 || input[0]["type"] != "function_call_output" || input[0]["call_id"] != "call-1" {
+		t.Fatalf("auto continuation input = %#v", input)
+	}
+}
+
+func TestResponsesToolContinuation_HTTPRoundTrip(t *testing.T) {
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var request map[string]any
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request)
+		w.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = fmt.Fprint(w, `{"id":"resp-1","model":"o3","status":"completed","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}"}]}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"id":"resp-2","model":"o3","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`)
+	}))
+	defer server.Close()
+
+	model := Chat("o3", WithAPIKey("key"), WithBaseURL(server.URL))
+	first, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "lookup"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleAssistant, Content: append(first.ReasoningParts, provider.Part{Type: provider.PartToolCall, ToolCallID: "call-1", ToolName: "lookup", ToolInput: json.RawMessage(`{}`)})},
+			{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-1", ToolOutput: "result"}}},
+		},
+		ProviderOptions: map[string]any{
+			"previousResponseId":         first.Response.ID,
+			"goaiAutoPreviousResponseID": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(requests))
+	}
+	if requests[1]["previous_response_id"] != "resp-1" {
+		t.Errorf("previous_response_id = %v", requests[1]["previous_response_id"])
+	}
+	input := requests[1]["input"].([]any)
+	if len(input) != 1 || input[0].(map[string]any)["type"] != "function_call_output" {
+		t.Errorf("continuation input = %#v", input)
+	}
+}
+
+func TestStreamResponses_ReasoningEncryptedContent(t *testing.T) {
+	sse := "event: response.output_item.added\n" +
+		`data: {"output_index":0,"item":{"type":"reasoning","id":"rs-1"}}` + "\n\n" +
+		"event: response.reasoning_summary_text.delta\n" +
+		`data: {"item_id":"rs-1","summary_index":0,"delta":"think"}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"output_index":0,"item":{"type":"reasoning","id":"rs-1","encrypted_content":"opaque-state"}}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"response":{"id":"resp-1","model":"o3"}}` + "\n\n"
+	out := make(chan provider.StreamChunk, 8)
+	streamResponses(context.Background(), io.NopCloser(strings.NewReader(sse)), out)
+
+	var chunks []provider.StreamChunk
+	for chunk := range out {
+		chunks = append(chunks, chunk)
+	}
+	var encrypted bool
+	for _, chunk := range chunks {
+		if openAI, ok := chunk.Metadata["openai"].(map[string]any); ok && openAI["encryptedContent"] == "opaque-state" {
+			encrypted = true
+		}
+	}
+	if !encrypted {
+		t.Fatal("stream did not preserve encrypted reasoning content")
+	}
+}
+
+func TestActiveReasoningForEvent_PrefersCanonicalItemID(t *testing.T) {
+	active := map[int]*responsesReasoning{
+		0: {canonicalID: "rs-0"},
+		1: {canonicalID: "rs-1"},
+	}
+	index, reasoning := activeReasoningForEvent(active, 1, "rs-0")
+	if index != 0 || reasoning.canonicalID != "rs-0" {
+		t.Fatalf("selected reasoning = %d, %#v; want item 0", index, reasoning)
+	}
+}
+
 func TestParseResponsesResult_CachedTokens(t *testing.T) {
 	body := `{
 		"id": "resp-1",
