@@ -55,6 +55,16 @@ func WithPromptCaching(b bool) Option
 
 **Default:** `false`.
 
+### WithCacheTTL
+
+Sets the ephemeral prompt-cache lifetime for Anthropic-family models.
+
+```go
+func WithCacheTTL(ttl string) Option
+```
+
+Use `"5m"` or `"1h"`; an empty value preserves the provider default. Other providers ignore this option.
+
 ### WithOptions
 
 Combines multiple `Option` values into a single `Option`. Useful for helper libraries that want to return one reusable option bundle.
@@ -289,6 +299,16 @@ func WithMaxRetries(n int) Option
 
 **Default:** `2`. Retries use exponential backoff. Only retryable errors trigger retry (see [Errors](errors.md)).
 
+### WithRetryObserver
+
+Sets a callback invoked before each retry attempt.
+
+```go
+func WithRetryObserver(fn RetryObserver) Option
+```
+
+The callback receives the zero-based retry attempt, the error that triggered the retry, and the delay before the next attempt.
+
 ### WithTimeout
 
 Sets the timeout for the entire generation call. For streaming calls, the timeout covers from the initial request until the stream is fully consumed.
@@ -325,12 +345,20 @@ func WithProviderOptions(opts map[string]any) Option
 
 ## Telemetry Hooks
 
-> **Panic handling:** Hooks use two panic strategies depending on execution context:
+> **Panic handling:** Hook panics are surfaced as `*PanicError` and reported through `WithOnPanic`; tool execution hooks remain resilient with their documented skip/preserve behavior.
 >
-> - **Caller goroutine** (`OnRequest`): panics propagate in `GenerateText`, `GenerateObject`, and `StreamText` first step. In `StreamText` step 2+ (goroutine), each callback is individually recovered.
-> - **Mixed** (`OnResponse`): recovered in `GenerateText`, `GenerateObject`, `StreamObject`, and background goroutines; propagates in `StreamText` first-step error path. See per-hook docs below.
-> - **Worker goroutines** (`OnStepFinish`, `OnToolCallStart`, `OnToolCall`): panics are recovered, logged to stderr, and do not propagate.
-> - **Interceptor hooks** (`OnBeforeToolExecute`, `OnAfterToolExecute`, `OnBeforeStep`): always panic-recovered with hook-specific behavior (skip tool, preserve result, or proceed normally).
+> - `OnBeforeStep` and `OnFinish` panics surface to the caller and stop processing.
+> - Other lifecycle hooks may recover panics according to their execution path; see each hook below.
+
+### WithOnPanic
+
+Registers a callback invoked whenever a user callback or `StopWhen` predicate panics.
+
+```go
+func WithOnPanic(fn func(PanicInfo)) Option
+```
+
+Multiple callbacks run in registration order. A panic inside an `OnPanic` callback is recovered and discarded.
 
 ### WithOnRequest
 
@@ -425,9 +453,9 @@ goai.WithOnBeforeStep(func(info goai.BeforeStepInfo) goai.BeforeStepResult {
 })
 ```
 
-Called before each LLM call in a multi-step tool loop (step 2+ only, not step 1). Can inject additional messages or stop the loop early. `info.Ctx` carries the generation context for cancellation checks or external calls. Only one callback supported. Panic-recovered: a panic is logged and the step proceeds normally.
+Called before each LLM call in a multi-step tool loop (step 2+ only, not step 1). Can inject additional messages or stop the loop early. `info.Ctx` carries the generation context for cancellation checks or external calls. Only one callback supported. A panic surfaces as `*PanicError` and stops processing.
 
-> **Panic handling note:** Interceptor hooks (`OnBeforeToolExecute`, `OnAfterToolExecute`, `OnBeforeStep`): always panic-recovered with hook-specific behavior (skip tool, preserve result, or proceed normally).
+> **Panic handling note:** `OnBeforeToolExecute` and `OnAfterToolExecute` remain resilient by skipping the tool or preserving its original result. `OnBeforeStep` panics surface as `*PanicError`.
 
 ### WithOnFinish
 
@@ -437,7 +465,7 @@ goai.WithOnFinish(func(info goai.FinishInfo) {
 })
 ```
 
-Called once after all generation steps complete. Fires in all code paths: `GenerateText`, `StreamText`, `GenerateObject` (including max_steps error), and `StreamObject`. Does NOT fire when DoGenerate/DoStream returns a provider error. Multiple callbacks supported (append). Panic-recovered.
+Called once after all generation steps complete. Fires in all code paths: `GenerateText`, `StreamText`, `GenerateObject` (including max_steps error), and `StreamObject`. Does NOT fire when DoGenerate/DoStream returns a provider error. Multiple callbacks supported (append). A panic surfaces as `*PanicError`, and subsequent `OnFinish` callbacks do not run.
 
 `FinishInfo.StepsExhausted` is the authoritative signal for max-steps exhaustion -- it is not available from any per-step hook.
 

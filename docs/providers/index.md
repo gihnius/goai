@@ -7,7 +7,7 @@ description: "GoAI SDK supports 25+ LLM providers: OpenAI, Anthropic, Google Gem
 
 GoAI SDK supports 25+ LLM providers with a single unified API. Most hosted providers auto-resolve credentials from environment variables; local/custom providers (for example `ollama`, `vllm`, `compat`) typically use explicit options.
 
-All 7 core functions — `GenerateText`, `StreamText`, `GenerateObject[T]`, `StreamObject[T]`, `Embed`, `EmbedMany`, and `GenerateImage` — work identically across all providers.
+The core functions — `GenerateText`, `StreamText`, `GenerateObject[T]`, `StreamObject[T]`, `Embed`, `EmbedMany`, and `GenerateImage` — share one API, but provider capabilities vary.
 
 ## Tier 1
 
@@ -55,7 +55,7 @@ Most use the shared `internal/openaicompat` codec (some wrappers delegate via `p
 
 | Provider                        | Default Endpoint     | Auth          | Features                       |
 | ------------------------------- | -------------------- | ------------- | ------------------------------ |
-| [Ollama](ollama.md)             | `localhost:11434/v1` | None required | Embedding support              |
+| [Ollama](ollama.md)             | `localhost:11434` | None required | Embedding support              |
 | [vLLM](vllm.md)                 | `localhost:8000/v1`  | Optional      | Embedding support              |
 | [Generic Compatible](compat.md) | (required)           | Configurable  | Any OpenAI-compatible endpoint |
 

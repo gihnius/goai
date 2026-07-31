@@ -58,7 +58,7 @@ fmt.Println(result.Text)
 
 ## Notes
 
-- Supports image inputs (depends on the underlying model).
+- Declares text-only chat capability; image input support is not exposed by this provider.
 - Automatically sends `HTTP-Referer` and `X-Title` headers as recommended by OpenRouter's API.
 - Usage reporting is enabled by default (`usage: {include: true}` in request body).
 - Environment variable `OPENROUTER_BASE_URL` can override the default endpoint.

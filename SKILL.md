@@ -93,11 +93,11 @@ model := openai.Chat("gpt-4o", openai.WithAPIKey("sk-..."))
 Most providers support these options (Bedrock uses AWS credential options; Ollama requires no auth):
 
 ```go
-provider.WithAPIKey(key)         // static API key
-provider.WithTokenSource(ts)     // dynamic auth (OAuth, service accounts)
-provider.WithBaseURL(url)        // override endpoint (Azure uses WithEndpoint)
-provider.WithHeaders(h)          // custom HTTP headers
-provider.WithHTTPClient(c)       // custom HTTP transport
+openai.WithAPIKey(key)            // static API key
+openai.WithTokenSource(ts)        // dynamic auth (OAuth, service accounts)
+openai.WithBaseURL(url)           // override endpoint (Azure uses WithEndpoint)
+openai.WithHeaders(h)             // custom HTTP headers
+openai.WithHTTPClient(c)          // custom HTTP transport
 ```
 
 ---

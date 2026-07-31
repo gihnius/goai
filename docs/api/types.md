@@ -20,6 +20,7 @@ The final result of a text generation call (`GenerateText` or `TextStream.Result
 ```go
 type TextResult struct {
     Text             string                       // Accumulated generated text (includes reasoning text when streaming).
+    Reasoning        string                       // Accumulated reasoning text when provided by the model.
     ToolCalls        []provider.ToolCall           // Tool calls from the final step.
     Steps            []StepResult                 // Results from each generation step.
     TotalUsage       provider.Usage               // Aggregated token usage across all steps.
@@ -40,6 +41,7 @@ The result of a single generation step in a multi-step tool loop.
 type StepResult struct {
     Number       int                      // 1-based step index.
     Text         string                   // Text generated in this step (excludes reasoning text).
+    Reasoning    string                   // Reasoning text for this step when provided by the model.
     ToolCalls    []provider.ToolCall       // Tool calls requested in this step.
     ToolResults  []provider.ToolResult     // Tool results for the requested calls.
     FinishReason provider.FinishReason    // Finish reason for this step.

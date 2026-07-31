@@ -47,7 +47,7 @@ goai/
 │   └── <13 more>/          # Mostly OpenAI-compat (some via compat/ or anthropic/ wrappers)
 │ # tools.go files: 5 files with provider-defined tools: anthropic/ (10 tools), openai/ (4 tools), google/ (3 tools), xai/ (2 tools), groq/ (1 tool)
 ├── internal/
-│   ├── openaicompat/       # Shared codec for 13+ providers
+│   ├── openaicompat/       # Shared codec for 18 provider implementation files
 │   ├── gemini/             # Schema sanitization (Vertex, Google)
 │   ├── sse/                # SSE parser
 │   └── httpc/              # HTTP helpers + ParseDataURL
@@ -55,7 +55,7 @@ goai/
 ├── observability/
 │   ├── langfuse/           # Langfuse observability integration (separate go.mod)
 │   └── otel/               # OpenTelemetry tracing and metrics (separate go.mod)
-├── examples/               # 31 runnable examples (30 with main.go + chat, agent-loop)
+├── examples/               # 32 runnable examples (each with main.go)
 └── bench/                  # Performance benchmarks (GoAI vs Vercel AI SDK)
 ```
 

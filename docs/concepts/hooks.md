@@ -201,8 +201,8 @@ Hook panics are recovered in most paths. "Propagates" = crashes the caller. "Rec
 | OnStepFinish | Recovered | Recovered | Recovered | Recovered |
 | OnBeforeToolExecute | Recovered (skips tool) | Recovered (skips tool) | Recovered (skips tool) | Recovered (skips tool) |
 | OnAfterToolExecute | Recovered (preserves result) | Recovered (preserves result) | Recovered (preserves result) | Recovered (preserves result) |
-| OnBeforeStep | Recovered (proceeds) | N/A | Recovered (proceeds) | Recovered (proceeds) |
-| OnFinish | Recovered | Recovered | Recovered | Recovered |
+| OnBeforeStep | Propagates | N/A | Propagates | Propagates |
+| OnFinish | Propagates | Propagates | Propagates | Propagates |
 
 *\* StreamText step 1 runs synchronously in the caller's goroutine (before the background goroutine starts). Step 2+ runs in a background goroutine where all panics are recovered. StreamObject OnRequest propagates like GenerateObject. StreamObject OnResponse is recovered on both success and error paths.*
 

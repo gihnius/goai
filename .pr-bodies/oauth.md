@@ -1,4 +1,4 @@
-`DiscoverAuth` resolves an MCP server's OAuth endpoints through a single path: fetch `{origin}/.well-known/oauth-protected-resource`, then `{origin}/.well-known/oauth-authorization-server`. Both at the bare origin, and no other candidate is tried.
+`DiscoverAuth` resolves an MCP server's OAuth endpoints by following the full discovery chain: it checks the `WWW-Authenticate` resource metadata pointer, path-aware and bare-origin protected-resource metadata, then OAuth Authorization Server and OpenID Connect metadata candidates, with the MCP origin fallback preserved.
 
 That covers the simplest deployment and misses the rest of the discovery chain the MCP authorization spec builds on:
 
