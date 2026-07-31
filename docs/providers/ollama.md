@@ -73,12 +73,12 @@ model := ollama.Chat("llama3",
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `WithBaseURL(url)` | `string` | Override the default `http://localhost:11434/v1` endpoint |
+| `WithBaseURL(url)` | `string` | Override the default `http://localhost:11434` endpoint |
 | `WithHeaders(h)` | `map[string]string` | Set additional HTTP headers |
 | `WithHTTPClient(c)` | `*http.Client` | Set a custom `*http.Client` |
 
 ## Notes
 
-- This is a convenience wrapper around the generic [`compat`](compat.md) provider.
-- Default endpoint: `http://localhost:11434/v1`.
+- This is a native Ollama implementation using the Ollama API endpoints.
+- Default endpoint: `http://localhost:11434`; chat and embeddings use `/api/chat` and `/api/embed`.
 - No authentication options (`WithAPIKey`, `WithTokenSource`) since Ollama does not require auth by default. For authenticated setups, use the [`compat`](compat.md) provider directly.

@@ -157,7 +157,7 @@ Treat `StepResult` contents as read-only. goai does not enforce this via deep-cl
 
 ### Panics
 
-Panics inside the predicate are recovered and logged. They are treated as "do not stop" so the loop continues.
+Panics inside the predicate produce a `*PanicError` with phase `StopWhen` and stop the loop.
 
 ## Scope
 

@@ -61,7 +61,7 @@ result, err := goai.GenerateText(ctx, model,
 )
 ```
 
-When streaming, reasoning chunks arrive as `provider.ChunkReasoning` type. In non-streaming mode (`GenerateText`), reasoning content is not surfaced in `TextResult`; use streaming to access it.
+When streaming, reasoning chunks arrive as `provider.ChunkReasoning` type. In non-streaming mode (`GenerateText`), reasoning content is surfaced in `TextResult.Reasoning`.
 
 ### Embeddings
 

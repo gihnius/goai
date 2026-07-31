@@ -32,3 +32,4 @@ testdata/
 .vibeflow
 *.out
 docs/drift-report
+.pr-bodies/
