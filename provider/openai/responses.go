@@ -461,6 +461,7 @@ func reasoningInputItem(part provider.Part) (map[string]any, bool) {
 	if encryptedContent != "" {
 		item["encrypted_content"] = encryptedContent
 	}
+	item["summary"] = []map[string]any{}
 	if part.Text != "" {
 		item["summary"] = []map[string]any{{"type": "summary_text", "text": part.Text}}
 	}
