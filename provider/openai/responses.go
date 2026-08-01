@@ -339,21 +339,40 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 
 		case provider.RoleAssistant:
 			var items []map[string]any
-			var textParts []string
-			hasReasoningItem := false
+			var message map[string]any
+			var messageContent []map[string]any
+			appendText := func(text string) {
+				if text == "" {
+					return
+				}
+				if message == nil {
+					message = map[string]any{
+						"type":    "message",
+						"role":    "assistant",
+						"content": messageContent,
+					}
+					items = append(items, message)
+				}
+				messageContent = append(messageContent, map[string]any{
+					"type": "output_text",
+					"text": text,
+				})
+				message["content"] = messageContent
+			}
 
 			for _, part := range msg.Content {
 				switch part.Type {
 				case provider.PartText:
-					textParts = append(textParts, part.Text)
+					appendText(part.Text)
 				case provider.PartReasoning:
 					if item, ok := reasoningInputItem(part); ok {
+						message = nil
 						items = append(items, item)
-						hasReasoningItem = true
 					} else if part.Text != "" {
-						textParts = append(textParts, part.Text)
+						appendText(part.Text)
 					}
 				case provider.PartToolCall:
+					message = nil
 					// Server-executed tool items (web_search_call,
 					// file_search_call, ...) round-trip verbatim so the model
 					// sees the same context across turns.
@@ -367,22 +386,6 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 						"name":      part.ToolName,
 						"arguments": string(part.ToolInput),
 					})
-				}
-			}
-
-			if len(textParts) > 0 {
-				message := map[string]any{
-					"type": "message",
-					"role": "assistant",
-					"content": []map[string]any{{
-						"type": "output_text",
-						"text": strings.Join(textParts, "\n"),
-					}},
-				}
-				if hasReasoningItem {
-					items = append(items, message)
-				} else {
-					items = append([]map[string]any{message}, items...)
 				}
 			}
 
@@ -451,7 +454,7 @@ func reasoningInputItem(part provider.Part) (map[string]any, bool) {
 	}
 	itemID, _ := openAI["itemId"].(string)
 	encryptedContent, _ := openAI["encryptedContent"].(string)
-	if itemID == "" && encryptedContent == "" {
+	if itemID == "" {
 		return nil, false
 	}
 	item := map[string]any{"type": "reasoning"}

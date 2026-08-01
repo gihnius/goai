@@ -3000,3 +3000,14 @@ func TestConvertMessages_AssistantReasoningRoundtrip(t *testing.T) {
 		t.Errorf("tool call name = %v, want do_thing", fn["name"])
 	}
 }
+
+func TestConvertMessages_ReasoningPolicyCanOmitNonStandardField(t *testing.T) {
+	result := ConvertMessages([]provider.Message{{
+		Role:    provider.RoleAssistant,
+		Content: []provider.Part{{Type: provider.PartReasoning, Text: "think"}},
+	}}, "", false)
+
+	if _, ok := result[0]["reasoning_content"]; ok {
+		t.Fatalf("reasoning_content = %v, want omitted", result[0]["reasoning_content"])
+	}
+}

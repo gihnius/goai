@@ -67,6 +67,10 @@ type ChatModelConfig struct {
 	// Most providers want this true.
 	IncludeStreamOptions bool
 
+	// IncludeReasoningContent opts into the provider-specific reasoning_content
+	// field for assistant messages.
+	IncludeReasoningContent bool
+
 	// WarnPromptCaching emits a one-line stderr warning when the caller sets
 	// GenerateParams.PromptCaching and the provider does not support it.
 	WarnPromptCaching bool
@@ -152,7 +156,8 @@ func (m *chatModel) DoGenerate(ctx context.Context, params provider.GeneratePara
 		return nil, err
 	}
 	body := BuildRequest(params, m.cfg.ModelID, false, RequestConfig{
-		ExtraBody: m.cfg.ExtraBody,
+		ExtraBody:               m.cfg.ExtraBody,
+		IncludeReasoningContent: m.cfg.IncludeReasoningContent,
 	})
 
 	resp, err := m.doHTTP(ctx, m.cfg.BaseURL+"/chat/completions", body)
@@ -174,8 +179,9 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 		return nil, err
 	}
 	body := BuildRequest(params, m.cfg.ModelID, true, RequestConfig{
-		IncludeStreamOptions: m.cfg.IncludeStreamOptions,
-		ExtraBody:            m.cfg.ExtraBody,
+		IncludeStreamOptions:    m.cfg.IncludeStreamOptions,
+		ExtraBody:               m.cfg.ExtraBody,
+		IncludeReasoningContent: m.cfg.IncludeReasoningContent,
 	})
 
 	resp, err := m.doHTTP(ctx, m.cfg.BaseURL+"/chat/completions", body)

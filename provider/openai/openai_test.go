@@ -94,6 +94,51 @@ func TestChat_ChatCompletions_Stream(t *testing.T) {
 	}
 }
 
+func TestReasoningInputItem_RequiresItemID(t *testing.T) {
+	part := openAIReasoningPart("", "think", "opaque-state")
+	if item, ok := reasoningInputItem(part); ok || item != nil {
+		t.Fatalf("reasoningInputItem() = %#v, %v; want nil, false without item ID", item, ok)
+	}
+}
+
+func TestConvertToResponsesInput_ReasoningTextToolCallOrder(t *testing.T) {
+	input := convertToResponsesInput([]provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Part{
+			openAIReasoningPart("rs-1", "think", "opaque-state"),
+			{Type: provider.PartText, Text: "I'll inspect."},
+			{Type: provider.PartToolCall, ToolCallID: "call-1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+		}},
+		{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-1", ToolOutput: "contents"}}},
+	})
+
+	wantTypes := []string{"reasoning", "message", "function_call", "function_call_output"}
+	if len(input) != len(wantTypes) {
+		t.Fatalf("input = %#v, want %d items", input, len(wantTypes))
+	}
+	for i, want := range wantTypes {
+		if got := input[i]["type"]; got != want {
+			t.Fatalf("input[%d].type = %v, want %q; input=%#v", i, got, want, input)
+		}
+	}
+}
+
+func TestConvertToResponsesInput_EmptyAndUnreplayableReasoning(t *testing.T) {
+	input := convertToResponsesInput([]provider.Message{{
+		Role: provider.RoleAssistant,
+		Content: []provider.Part{
+			{Type: provider.PartText},
+			{Type: provider.PartReasoning, Text: "semantic fallback"},
+		},
+	}})
+	if len(input) != 1 || input[0]["type"] != "message" {
+		t.Fatalf("input = %#v, want one fallback message", input)
+	}
+	content := input[0]["content"].([]map[string]any)
+	if content[0]["text"] != "semantic fallback" {
+		t.Fatalf("content = %#v, want semantic fallback", content)
+	}
+}
+
 func TestChat_ChatCompletions_Generate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {

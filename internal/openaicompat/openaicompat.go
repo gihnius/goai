@@ -52,6 +52,10 @@ type RequestConfig struct {
 
 	// ExtraBody contains provider-specific fields to merge into the request body.
 	ExtraBody map[string]any
+
+	// IncludeReasoningContent controls serialization of the non-standard
+	// reasoning_content field. Providers must opt in when their API requires it.
+	IncludeReasoningContent bool
 }
 
 // BuildRequest creates a standard OpenAI chat/completions request body.
@@ -72,7 +76,7 @@ func BuildRequest(params provider.GenerateParams, modelID string, streaming bool
 	}
 
 	// Messages
-	body["messages"] = ConvertMessages(params.Messages, params.System)
+	body["messages"] = ConvertMessages(params.Messages, params.System, cfg.IncludeReasoningContent)
 
 	// Extract structuredOutputs and strictJsonSchema once -- used by both tools and response format.
 	structuredOutputs := true // default true, matching Vercel

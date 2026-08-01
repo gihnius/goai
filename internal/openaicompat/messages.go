@@ -8,7 +8,11 @@ import (
 
 // ConvertMessages converts provider.Message slice to OpenAI wire format.
 // The system prompt is prepended as the first message if non-empty.
-func ConvertMessages(msgs []provider.Message, system string) []map[string]any {
+func ConvertMessages(msgs []provider.Message, system string, includeReasoningContent ...bool) []map[string]any {
+	includeReasoning := true
+	if len(includeReasoningContent) > 0 {
+		includeReasoning = includeReasoningContent[0]
+	}
 	result := make([]map[string]any, 0, len(msgs)+1)
 
 	if system != "" {
@@ -117,7 +121,7 @@ func ConvertMessages(msgs []provider.Message, system string) []map[string]any {
 		if len(textParts) > 0 {
 			m["content"] = joinText(textParts)
 		}
-		if len(reasoningParts) > 0 {
+		if includeReasoning && len(reasoningParts) > 0 {
 			m["reasoning_content"] = joinText(reasoningParts)
 		}
 		if len(toolCalls) > 0 {

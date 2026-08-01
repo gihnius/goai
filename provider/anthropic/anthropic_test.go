@@ -21,12 +21,14 @@ import (
 type failReader struct{}
 
 func (f *failReader) Read(_ []byte) (int, error) { return 0, fmt.Errorf("read error") }
-func (f *failReader) Close() error                { return nil }
+func (f *failReader) Close() error               { return nil }
 
 // failTokenSource is a provider.TokenSource that always returns an error.
 type failTokenSource struct{}
 
-func (f failTokenSource) Token(_ context.Context) (string, error) { return "", fmt.Errorf("token error") }
+func (f failTokenSource) Token(_ context.Context) (string, error) {
+	return "", fmt.Errorf("token error")
+}
 
 // --- Streaming tests ---
 
@@ -933,6 +935,38 @@ func TestConvertMessages_ReasoningWithoutSignature(t *testing.T) {
 	}
 	if content[0]["type"] != "text" {
 		t.Errorf("part[0].type = %v, want text", content[0]["type"])
+	}
+}
+
+func TestConvertMessages_EmptySignedReasoning(t *testing.T) {
+	msgs := convertMessages([]provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Part{
+			{Type: provider.PartReasoning, ProviderOptions: map[string]any{"signature": "sig-omitted"}},
+			{Type: provider.PartText, Text: "answer"},
+		}},
+	})
+
+	content := msgs[0]["content"].([]map[string]any)
+	if len(content) != 2 {
+		t.Fatalf("content = %#v, want omitted thinking block and text", content)
+	}
+	if content[0]["type"] != "thinking" || content[0]["thinking"] != "" || content[0]["signature"] != "sig-omitted" {
+		t.Fatalf("thinking block = %#v, want unchanged empty signed thinking", content[0])
+	}
+}
+
+func TestConvertMessages_SkipsEmptyAndMergesSameRole(t *testing.T) {
+	msgs := convertMessages([]provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Part{{Type: provider.PartReasoning}}},
+		{Role: provider.RoleAssistant, Content: []provider.Part{{Type: provider.PartText, Text: "one"}}},
+		{Role: provider.RoleAssistant, Content: []provider.Part{{Type: provider.PartText, Text: "two"}}},
+	})
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want one merged user message", msgs)
+	}
+	content := msgs[0]["content"].([]map[string]any)
+	if len(content) != 2 {
+		t.Fatalf("content = %#v, want two text blocks", content)
 	}
 }
 
