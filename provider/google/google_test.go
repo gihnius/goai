@@ -20,12 +20,18 @@ import (
 type failReader struct{}
 
 func (f *failReader) Read(_ []byte) (int, error) { return 0, fmt.Errorf("read error") }
-func (f *failReader) Close() error                { return nil }
+func (f *failReader) Close() error               { return nil }
 
 // failTokenSource is a provider.TokenSource that always returns an error.
 type failTokenSource struct{}
 
-func (f failTokenSource) Token(_ context.Context) (string, error) { return "", fmt.Errorf("token error") }
+func (f failTokenSource) Token(_ context.Context) (string, error) {
+	return "", fmt.Errorf("token error")
+}
+
+type googleRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f googleRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // --- Streaming tests ---
 
@@ -846,6 +852,64 @@ func TestConvertMessages_FileRemoteRef(t *testing.T) {
 	}
 }
 
+func TestConvertMessages_MergesParallelToolResults(t *testing.T) {
+	msgs := convertMessages([]provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Part{
+			{Type: provider.PartToolCall, ToolCallID: "call-1", ToolName: "first", ToolInput: json.RawMessage(`{}`)},
+			{Type: provider.PartToolCall, ToolCallID: "call-2", ToolName: "second", ToolInput: json.RawMessage(`{}`)},
+		}},
+		{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-1", ToolName: "first", ToolOutput: `{"value":1}`}}},
+		{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-2", ToolName: "second", ToolOutput: `{"value":2}`}}},
+	})
+
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %#v, want one model turn and one merged user turn", msgs)
+	}
+	parts := msgs[1]["parts"].([]map[string]any)
+	if len(parts) != 2 {
+		t.Fatalf("parallel function responses = %#v, want two parts in one user turn", parts)
+	}
+}
+
+func TestConvertMessages_PreservesFunctionCallIDs(t *testing.T) {
+	msgs := convertMessages([]provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Part{{Type: provider.PartToolCall, ToolCallID: "call-1", ToolName: "lookup", ToolInput: json.RawMessage(`{}`)}}},
+		{Role: provider.RoleTool, Content: []provider.Part{{Type: provider.PartToolResult, ToolCallID: "call-1", ToolName: "lookup", ToolOutput: `{"ok":true}`}}},
+	})
+
+	call := msgs[0]["parts"].([]map[string]any)[0]["functionCall"].(map[string]any)
+	response := msgs[1]["parts"].([]map[string]any)[0]["functionResponse"].(map[string]any)
+	if call["id"] != "call-1" || response["id"] != "call-1" {
+		t.Fatalf("IDs = (%v, %v), want call-1", call["id"], response["id"])
+	}
+}
+
+func TestParseSSE_PreservesFunctionCallID(t *testing.T) {
+	body := strings.NewReader(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc-1","name":"lookup","args":{}}}]}}]}` + "\n\n")
+	out := make(chan provider.StreamChunk, 8)
+	parseSSE(t.Context(), body, out)
+
+	var got string
+	for chunk := range out {
+		if chunk.Type == provider.ChunkToolCall {
+			got = chunk.ToolCallID
+		}
+	}
+	if got != "fc-1" {
+		t.Fatalf("ToolCallID = %q, want fc-1", got)
+	}
+}
+
+func TestParseResponse_PreservesFunctionCallID(t *testing.T) {
+	result, err := parseResponse([]byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"fc-1","name":"lookup","args":{}}}]}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].ID != "fc-1" {
+		t.Fatalf("ToolCalls = %#v, want ID fc-1", result.ToolCalls)
+	}
+}
+
 func TestConvertMessages_FileAndImage(t *testing.T) {
 	msgs := convertMessages([]provider.Message{
 		{Role: provider.RoleUser, Content: []provider.Part{
@@ -1006,7 +1070,7 @@ func TestFileUploader_UploadFile_Google(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"file":{"name":"files/abc123","uri":"https://generativelanguage.googleapis.com/v1beta/files/abc123","mimeType":"application/pdf","sizeBytes":"1234","expirationTime":"2025-01-01T00:00:00Z","displayName":"test.pdf"}}`)
+		_, _ = fmt.Fprint(w, `{"file":{"name":"files/abc123","uri":"https://generativelanguage.googleapis.com/v1beta/files/abc123","mimeType":"application/pdf","sizeBytes":"1234","expirationTime":"2025-01-01T00:00:00Z","displayName":"test.pdf","state":"ACTIVE"}}`)
 	}))
 	defer server.Close()
 
@@ -1041,6 +1105,171 @@ func TestFileUploader_UploadFile_Google(t *testing.T) {
 	}
 	if len(ref.Data) == 0 {
 		t.Error("ref.Data should contain file bytes")
+	}
+}
+
+func TestFileUploader_UploadFile_Google_ProcessingToActive(t *testing.T) {
+	var polls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			_, _ = fmt.Fprint(w, `{"file":{"name":"files/async","uri":"https://example/files/async","mimeType":"application/pdf","displayName":"async.pdf","state":"PROCESSING"}}`)
+			return
+		}
+		polls++
+		_, _ = fmt.Fprintf(w, `{"name":"files/async","uri":"https://example/files/async","mimeType":"application/pdf","displayName":"async.pdf","state":"%s"}`, map[bool]string{true: "ACTIVE", false: "PROCESSING"}[polls > 1])
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-2.5-flash", WithAPIKey("test-key"), WithBaseURL(server.URL))
+	ref, err := model.(provider.FileUploadCapableModel).FileUploader().UploadFile(t.Context(), provider.FileUpload{
+		Reader: strings.NewReader("data"), Filename: "async.pdf", MediaType: "application/pdf",
+	})
+	if err != nil {
+		t.Fatalf("UploadFile error: %v", err)
+	}
+	if ref.ID != "files/async" || polls != 2 {
+		t.Fatalf("ref=%+v polls=%d, want active ref after 2 polls", ref, polls)
+	}
+}
+
+func TestFileUploader_UploadFile_Google_FailedProcessing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"file":{"name":"files/failed","state":"FAILED","error":{"message":"unsupported format"}}}`)
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-2.5-flash", WithAPIKey("test-key"), WithBaseURL(server.URL))
+	_, err := model.(provider.FileUploadCapableModel).FileUploader().UploadFile(t.Context(), provider.FileUpload{
+		Reader: strings.NewReader("data"), Filename: "bad.pdf", MediaType: "application/pdf",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported format") {
+		t.Fatalf("error = %v, want processing error", err)
+	}
+}
+
+func TestFileUploader_UploadFile_Google_ContextCancelledWhileProcessing(t *testing.T) {
+	polling := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			close(polling)
+		}
+		_, _ = fmt.Fprint(w, `{"file":{"name":"files/wait","state":"PROCESSING"}}`)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	model := Chat("gemini-2.5-flash", WithAPIKey("test-key"), WithBaseURL(server.URL))
+	done := make(chan error, 1)
+	go func() {
+		_, err := model.(provider.FileUploadCapableModel).FileUploader().UploadFile(ctx, provider.FileUpload{
+			Reader: strings.NewReader("data"), Filename: "wait.pdf", MediaType: "application/pdf",
+		})
+		done <- err
+	}()
+	<-polling
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitForFile_UnknownState(t *testing.T) {
+	u := &fileUploader{}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "BROKEN"})
+	if err == nil || !strings.Contains(err.Error(), "unknown file state") {
+		t.Fatalf("error = %v, want unknown state error", err)
+	}
+}
+
+func TestWaitForFile_FailedWithoutMessage(t *testing.T) {
+	u := &fileUploader{}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "FAILED"})
+	if err == nil || err.Error() != "google: file processing failed" {
+		t.Fatalf("error = %v, want generic processing error", err)
+	}
+}
+
+func TestWaitForFile_TokenError(t *testing.T) {
+	u := &fileUploader{opts: options{tokenSource: failTokenSource{}, baseURL: "http://example.com"}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING"})
+	if err == nil || !strings.Contains(err.Error(), "resolving auth token") {
+		t.Fatalf("error = %v, want token error", err)
+	}
+}
+
+func TestWaitForFile_HTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"not ready"}}`)
+	}))
+	defer server.Close()
+
+	u := &fileUploader{opts: options{tokenSource: provider.StaticToken("test-key"), baseURL: server.URL, headers: map[string]string{"X-Test": "value"}}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING", Name: "files/wait"})
+	if err == nil {
+		t.Fatal("expected HTTP error")
+	}
+}
+
+func TestWaitForFile_ContextCancelledBeforePoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	u := &fileUploader{}
+	_, err := u.waitForFile(ctx, googleFile{State: "PROCESSING"})
+	if err != context.Canceled {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitForFile_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "not-json")
+	}))
+	defer server.Close()
+
+	u := &fileUploader{opts: options{tokenSource: provider.StaticToken("test-key"), baseURL: server.URL}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING", Name: "files/wait"})
+	if err == nil || !strings.Contains(err.Error(), "decoding response") {
+		t.Fatalf("error = %v, want decode error", err)
+	}
+}
+
+func TestWaitForFile_RequestCreationError(t *testing.T) {
+	u := &fileUploader{opts: options{tokenSource: provider.StaticToken("test-key"), baseURL: "http://example.com/\n"}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING", Name: "files/wait"})
+	if err == nil || !strings.Contains(err.Error(), "creating request") {
+		t.Fatalf("error = %v, want request creation error", err)
+	}
+}
+
+func TestWaitForFile_HTTPClientError(t *testing.T) {
+	u := &fileUploader{opts: options{
+		tokenSource: provider.StaticToken("test-key"),
+		baseURL:     "http://example.com",
+		httpClient: &http.Client{Transport: googleRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport failed")
+		})},
+	}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING", Name: "files/wait"})
+	if err == nil || !strings.Contains(err.Error(), "sending request") {
+		t.Fatalf("error = %v, want HTTP client error", err)
+	}
+}
+
+func TestWaitForFile_ResponseReadError(t *testing.T) {
+	u := &fileUploader{opts: options{
+		tokenSource: provider.StaticToken("test-key"),
+		baseURL:     "http://example.com",
+		httpClient: &http.Client{Transport: googleRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: &failReader{}}, nil
+		})},
+	}}
+	_, err := u.waitForFile(t.Context(), googleFile{State: "PROCESSING", Name: "files/wait"})
+	if err == nil || !strings.Contains(err.Error(), "reading response") {
+		t.Fatalf("error = %v, want response read error", err)
 	}
 }
 
@@ -1107,7 +1336,7 @@ func TestFileUploader_DeleteFile_Google_HTTPError(t *testing.T) {
 func TestFileUploader_UploadFile_EmptyMediaType_Google(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"file":{"name":"files/mediatype","uri":"https://generativelanguage.googleapis.com/v1beta/files/mediatype","mimeType":"application/octet-stream","sizeBytes":"3","displayName":"test.bin"}}`)
+		_, _ = fmt.Fprint(w, `{"file":{"name":"files/mediatype","uri":"https://generativelanguage.googleapis.com/v1beta/files/mediatype","mimeType":"application/octet-stream","sizeBytes":"3","displayName":"test.bin","state":"ACTIVE"}}`)
 	}))
 	defer server.Close()
 
@@ -1183,7 +1412,7 @@ func TestFileUploader_UploadFile_Headers_Google(t *testing.T) {
 			t.Errorf("X-Custom = %q", r.Header.Get("X-Custom"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"file":{"name":"files/headers","uri":"https://generativelanguage.googleapis.com/v1beta/files/headers","mimeType":"text/plain","sizeBytes":"3","displayName":"test.txt"}}`)
+		_, _ = fmt.Fprint(w, `{"file":{"name":"files/headers","uri":"https://generativelanguage.googleapis.com/v1beta/files/headers","mimeType":"text/plain","sizeBytes":"3","displayName":"test.txt","state":"ACTIVE"}}`)
 	}))
 	defer server.Close()
 

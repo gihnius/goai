@@ -19,6 +19,21 @@ type fileUploader struct {
 	opts options
 }
 
+const filePollInterval = 100 * time.Millisecond
+
+type googleFile struct {
+	Name           string `json:"name"`
+	URI            string `json:"uri"`
+	MimeType       string `json:"mimeType"`
+	SizeBytes      string `json:"sizeBytes"`
+	ExpirationTime string `json:"expirationTime"`
+	DisplayName    string `json:"displayName"`
+	State          string `json:"state"`
+	Error          *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
 func (u *fileUploader) UploadFile(ctx context.Context, upload provider.FileUpload) (*provider.RemoteFileRef, error) {
 	data, err := io.ReadAll(upload.Reader)
 	if err != nil {
@@ -101,35 +116,96 @@ func (u *fileUploader) UploadFile(ctx context.Context, upload provider.FileUploa
 	}
 
 	var result struct {
-		File struct {
-			Name           string `json:"name"`
-			URI            string `json:"uri"`
-			MimeType       string `json:"mimeType"`
-			SizeBytes      string `json:"sizeBytes"`
-			ExpirationTime string `json:"expirationTime"`
-			DisplayName    string `json:"displayName"`
-		} `json:"file"`
+		File googleFile `json:"file"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	file, err := u.waitForFile(ctx, result.File)
+	if err != nil {
+		return nil, err
+	}
+	return u.remoteFileRef(file, data), nil
+}
+
+func (u *fileUploader) remoteFileRef(file googleFile, data []byte) *provider.RemoteFileRef {
 	var expiresAt time.Time
-	if result.File.ExpirationTime != "" {
-		if t, err := time.Parse(time.RFC3339, result.File.ExpirationTime); err == nil {
+	if file.ExpirationTime != "" {
+		if t, err := time.Parse(time.RFC3339, file.ExpirationTime); err == nil {
 			expiresAt = t
 		}
 	}
-
 	return &provider.RemoteFileRef{
 		Provider:  "google",
-		ID:        result.File.Name,
-		URI:       result.File.URI,
-		Filename:  result.File.DisplayName,
-		MediaType: result.File.MimeType,
+		ID:        file.Name,
+		URI:       file.URI,
+		Filename:  file.DisplayName,
+		MediaType: file.MimeType,
 		ExpiresAt: expiresAt,
 		Data:      data,
-	}, nil
+	}
+}
+
+func (u *fileUploader) waitForFile(ctx context.Context, file googleFile) (googleFile, error) {
+	for {
+		switch file.State {
+		case "ACTIVE":
+			return file, nil
+		case "FAILED":
+			if file.Error != nil && file.Error.Message != "" {
+				return googleFile{}, fmt.Errorf("google: file processing failed: %s", file.Error.Message)
+			}
+			return googleFile{}, fmt.Errorf("google: file processing failed")
+		case "PROCESSING", "STATE_UNSPECIFIED", "":
+			// Continue polling until the resource reaches a terminal state.
+		default:
+			return googleFile{}, fmt.Errorf("google: unknown file state %q", file.State)
+		}
+
+		timer := time.NewTimer(filePollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return googleFile{}, ctx.Err()
+		case <-timer.C:
+		}
+
+		token, err := u.opts.tokenSource.Token(ctx)
+		if err != nil {
+			return googleFile{}, fmt.Errorf("resolving auth token: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.opts.baseURL+"/v1beta/"+file.Name, nil)
+		if err != nil {
+			return googleFile{}, fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("x-goog-api-key", token)
+		for k, v := range u.opts.headers {
+			req.Header.Set(k, v)
+		}
+		client := u.opts.httpClient
+		if client == nil {
+			client = http.DefaultClient
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return googleFile{}, ctxErr
+			}
+			return googleFile{}, fmt.Errorf("sending request: %w", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return googleFile{}, fmt.Errorf("reading response: %w", readErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return googleFile{}, goai.ParseHTTPErrorWithHeaders("google", resp.StatusCode, body, resp.Header)
+		}
+		if err := json.Unmarshal(body, &file); err != nil {
+			return googleFile{}, fmt.Errorf("decoding response: %w", err)
+		}
+	}
 }
 
 func (u *fileUploader) DeleteFile(ctx context.Context, ref provider.RemoteFileRef) error {

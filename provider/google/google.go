@@ -425,6 +425,7 @@ func (m *chatModel) buildRequest(params provider.GenerateParams) (geminiRequestB
 
 func convertMessages(msgs []provider.Message) []map[string]any {
 	result := make([]map[string]any, 0, len(msgs))
+	lastWasTool := false
 
 	for _, msg := range msgs {
 		if msg.Role == provider.RoleSystem {
@@ -488,11 +489,15 @@ func convertMessages(msgs []provider.Message) []map[string]any {
 				if args == nil {
 					args = map[string]any{}
 				}
+				functionCall := map[string]any{
+					"name": part.ToolName,
+					"args": args,
+				}
+				if part.ToolCallID != "" {
+					functionCall["id"] = part.ToolCallID
+				}
 				fcPart := map[string]any{
-					"functionCall": map[string]any{
-						"name": part.ToolName,
-						"args": args,
-					},
+					"functionCall": functionCall,
 				}
 				if google, ok := part.ProviderOptions["google"].(map[string]any); ok {
 					if sig, ok := google["thoughtSignature"].(string); ok && sig != "" {
@@ -511,20 +516,31 @@ func convertMessages(msgs []provider.Message) []map[string]any {
 				if _, ok := response.(map[string]any); !ok {
 					response = map[string]any{"result": response}
 				}
-				parts = append(parts, map[string]any{
-					"functionResponse": map[string]any{
-						"name":     part.ToolName,
-						"response": response,
-					},
-				})
+				functionResponse := map[string]any{
+					"name":     part.ToolName,
+					"response": response,
+				}
+				if part.ToolCallID != "" {
+					functionResponse["id"] = part.ToolCallID
+				}
+				parts = append(parts, map[string]any{"functionResponse": functionResponse})
 			}
 		}
 
 		if len(parts) > 0 {
-			result = append(result, map[string]any{
+			content := map[string]any{
 				"role":  role,
 				"parts": parts,
-			})
+			}
+			if msg.Role == provider.RoleTool && lastWasTool && len(result) > 0 {
+				existing, _ := result[len(result)-1]["parts"].([]map[string]any)
+				result[len(result)-1]["parts"] = append(existing, parts...)
+			} else {
+				result = append(result, content)
+			}
+			lastWasTool = msg.Role == provider.RoleTool
+		} else {
+			lastWasTool = false
 		}
 	}
 
@@ -560,6 +576,7 @@ type geminiResponse struct {
 				Thought          bool   `json:"thought,omitempty"`
 				ThoughtSignature string `json:"thoughtSignature,omitempty"`
 				FunctionCall     *struct {
+					ID   string          `json:"id,omitempty"`
 					Name string          `json:"name"`
 					Args json.RawMessage `json:"args"`
 				} `json:"functionCall,omitempty"`
@@ -653,7 +670,10 @@ func parseSSE(ctx context.Context, body io.Reader, out chan<- provider.StreamChu
 			if part.FunctionCall != nil {
 				// Gemini sends complete function calls (not streaming).
 				argsStr := string(part.FunctionCall.Args)
-				callID := fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, callIndex)
+				callID := part.FunctionCall.ID
+				if callID == "" {
+					callID = fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, callIndex)
+				}
 				callIndex++
 
 				if !provider.TrySend(ctx, out, provider.StreamChunk{
@@ -829,7 +849,10 @@ func parseResponse(body []byte) (*provider.GenerateResult, error) {
 	var callIndex int
 	for _, part := range candidate.Content.Parts {
 		if part.FunctionCall != nil {
-			callID := fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, callIndex)
+			callID := part.FunctionCall.ID
+			if callID == "" {
+				callID = fmt.Sprintf("call_%s_%d", part.FunctionCall.Name, callIndex)
+			}
 			callIndex++
 			tc := provider.ToolCall{
 				ID:    callID,
