@@ -1235,7 +1235,7 @@ func TestGenerateText_ToolLoop_UnknownTool(t *testing.T) {
 			// Check tool result is "error: unknown tool".
 			for _, msg := range params.Messages {
 				for _, p := range msg.Content {
-					if p.Type == provider.PartToolResult && p.ToolOutput == "error: goai: unknown tool" {
+					if p.Type == provider.PartToolResult && p.ToolOutput == `error: goai: unknown tool "nonexistent"; available tools: known` {
 						return &provider.GenerateResult{Text: "ok", FinishReason: provider.FinishStop}, nil
 					}
 				}
@@ -3244,7 +3244,7 @@ func TestStreamText_ToolLoop_UnknownTool(t *testing.T) {
 			// Check tool result has unknown tool error.
 			for _, msg := range params.Messages {
 				for _, p := range msg.Content {
-					if p.Type == provider.PartToolResult && p.ToolOutput == "error: goai: unknown tool" {
+					if p.Type == provider.PartToolResult && p.ToolOutput == `error: goai: unknown tool "nonexistent"; available tools: known` {
 						return streamFromChunks(
 							provider.StreamChunk{Type: provider.ChunkText, Text: "ok"},
 							provider.StreamChunk{Type: provider.ChunkFinish, FinishReason: provider.FinishStop},
