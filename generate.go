@@ -1714,7 +1714,13 @@ func executeToolsParallel(
 			// panic prevents Execute from running (the tool should not execute if the
 			// pre-hook crashed). For unknown tools, Execute never runs anyway, so both
 			// hooks fire independently for observability completeness.
-			results[i] = toolOutput{index: i, err: ErrUnknownTool}
+			//
+			// Wrap ErrUnknownTool (preserving errors.Is) with the attempted name and
+			// the registered tools: models occasionally emit corrupted tool names,
+			// and seeing the valid list lets them self-correct in one step.
+			unknownErr := fmt.Errorf("%w %q; available tools: %s",
+				ErrUnknownTool, tc.Name, strings.Join(slices.Sorted(maps.Keys(toolMap)), ", "))
+			results[i] = toolOutput{index: i, err: unknownErr}
 			for _, fn := range hooks.onToolCallStart {
 				func(f func(ToolCallStartInfo)) {
 					defer func() {
@@ -1737,7 +1743,7 @@ func executeToolsParallel(
 						ToolName:   tc.Name,
 						Step:       step,
 						Input:      tc.Input,
-						Error:      ErrUnknownTool,
+						Error:      unknownErr,
 					})
 				}(fn)
 			}
