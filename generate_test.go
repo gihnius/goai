@@ -1270,6 +1270,9 @@ func TestGenerateText_ToolLoop_UnknownTool(t *testing.T) {
 	if !errors.Is(capturedInfo.Error, ErrUnknownTool) {
 		t.Errorf("ToolCallInfo.Error = %v, want ErrUnknownTool", capturedInfo.Error)
 	}
+	if got := capturedInfo.Error.Error(); got != `goai: unknown tool "nonexistent"; available tools: known` {
+		t.Errorf("ToolCallInfo.Error = %q, want enriched unknown-tool error", got)
+	}
 }
 
 func TestGenerateText_ToolLoop_NoExecuteNoLoop(t *testing.T) {
@@ -3284,6 +3287,9 @@ func TestStreamText_ToolLoop_UnknownTool(t *testing.T) {
 	}
 	if !errors.Is(capturedInfo.Error, ErrUnknownTool) {
 		t.Errorf("ToolCallInfo.Error = %v, want ErrUnknownTool", capturedInfo.Error)
+	}
+	if got := capturedInfo.Error.Error(); got != `goai: unknown tool "nonexistent"; available tools: known` {
+		t.Errorf("ToolCallInfo.Error = %q, want enriched unknown-tool error", got)
 	}
 }
 
