@@ -42,7 +42,7 @@ Inspired by the [Vercel AI SDK](https://sdk.vercel.ai). The same clean abstracti
 
 ## Features
 
-- **7 core functions**: `GenerateText`, `StreamText`, `GenerateObject[T]`, `StreamObject[T]`, `Embed`, `EmbedMany`, `GenerateImage`
+- **8 core functions**: `GenerateText`, `StreamText`, `GenerateObject[T]`, `StreamObject[T]`, `Embed`, `EmbedMany`, `GenerateImage`, `GenerateVideo`
 - **25+ providers**: OpenAI, Anthropic, Google, Bedrock, Azure, Vertex, Mistral, xAI, Groq, Cohere, DeepSeek, MiniMax, Fireworks, Together, DeepInfra, OpenRouter, Requesty, Perplexity, Cerebras, Ollama, vLLM, RunPod, Cloudflare Workers AI, FPT Smart Cloud, NVIDIA NIM, llama.cpp, + generic OpenAI-compatible
 - **Auto tool loop**: Define tools with `Execute` handlers, set `MaxSteps` for `GenerateText` and `StreamText`
 - **Structured output**: `GenerateObject[T]` auto-generates JSON Schema from Go types via reflection
@@ -327,6 +327,29 @@ os.WriteFile("sunset.png", result.Images[0].Data, 0644)
 ```
 
 Also supported: Google Imagen (`google.Image("imagen-4.0-generate-001")`) and Vertex AI (`vertex.Image(...)`).
+
+## Video Generation
+
+Google Veo video generation uses a long-running operation. GoAI starts the operation, polls until completion, and downloads the resulting video bytes.
+
+```go
+ctx := context.Background()
+model := google.Video("veo-3.1-generate-preview")
+
+result, err := goai.GenerateVideo(ctx, model,
+	goai.WithVideoPrompt("A paper plane taking flight at sunrise"),
+	goai.WithVideoAspectRatio("16:9"),
+	goai.WithVideoResolution("720p"),
+	goai.WithVideoDuration(8*time.Second),
+	goai.WithVideoAudio(true),
+)
+if err != nil {
+	log.Fatal(err)
+}
+os.WriteFile("plane.mp4", result.Video.Data, 0644)
+```
+
+Image-to-video is supported with `WithVideoImage`. First/last frames and image references are available through `WithVideoFrameImages` and `WithVideoInputReferences`.
 
 ## Observability
 

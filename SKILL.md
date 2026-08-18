@@ -28,7 +28,7 @@ import (
 
 ## Core API
 
-### 7 Top-Level Functions
+### 8 Top-Level Functions
 
 | Function                                      | Purpose                         | Returns                     |
 | --------------------------------------------- | ------------------------------- | --------------------------- |
@@ -39,10 +39,11 @@ import (
 | `goai.Embed(ctx, model, text, opts...)`       | Single text embedding           | `(*EmbedResult, error)`     |
 | `goai.EmbedMany(ctx, model, texts, opts...)`  | Batch embeddings (auto-chunked) | `(*EmbedManyResult, error)` |
 | `goai.GenerateImage(ctx, model, imgOpts...)`  | Image generation                | `(*ImageResult, error)`     |
+| `goai.GenerateVideo(ctx, model, vidOpts...)`  | Video generation                | `(*VideoResult, error)`     |
 
 ### Model Constructors
 
-Each provider has `Chat()`, and optionally `Embedding()` and `Image()`:
+Each provider has `Chat()`, and optionally `Embedding()`, `Image()`, and `Video()`:
 
 ```go
 // Language models
@@ -64,6 +65,9 @@ ollama.Embedding("nomic-embed-text")
 // Image models
 openai.Image("gpt-image-1")
 google.Image("imagen-4.0-generate-001")
+
+// Video models
+google.Video("veo-3.1-generate-preview")
 ```
 
 ### Auth - Auto-Resolved from Environment
@@ -270,7 +274,20 @@ result, err := goai.GenerateImage(ctx, openai.Image("gpt-image-1"),
 
 **Note**: `GenerateImage` uses `ImageOption` (not `Option`): `WithImagePrompt`, `WithImageCount`, `WithImageSize`, `WithAspectRatio`, `WithImageMaxRetries`, `WithImageTimeout`, `WithImageProviderOptions`.
 
-### 9. Provider-Defined Tools (Server-Side)
+### 9. Video Generation
+
+```go
+result, err := goai.GenerateVideo(ctx, google.Video("veo-3.1-generate-preview"),
+    goai.WithVideoPrompt("A gopher writing Go code"),
+    goai.WithVideoAspectRatio("16:9"),
+    goai.WithVideoDuration(8*time.Second),
+)
+// result.Video.Data = raw bytes, result.Video.MediaType = "video/mp4"
+```
+
+Video generation handles asynchronous operation polling and authenticated downloads. Use `WithVideoImage` for image-to-video and `WithVideoPollTimeout` to bound long-running operations.
+
+### 10. Provider-Defined Tools (Server-Side)
 
 Built-in tools executed by the provider, not your code:
 
@@ -310,7 +327,7 @@ Available provider tools:
 - **xAI**: `WebSearch()`, `XSearch()`
 - **Groq**: `BrowserSearch()`
 
-### 10. Observability Hooks
+### 11. Observability Hooks
 
 ```go
 result, err := goai.GenerateText(ctx, model,

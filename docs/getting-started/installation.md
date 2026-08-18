@@ -98,7 +98,7 @@ Yes. GoAI SDK is released under the MIT License, which allows free commercial us
 
 ### How do I switch between LLM providers?
 
-Change one line — the provider import and model initialization. All 7 core functions (`GenerateText`, `StreamText`, `GenerateObject`, `StreamObject`, `Embed`, `EmbedMany`, `GenerateImage`) work identically across all 25+ providers.
+Change the provider import and model constructor while keeping the same core API. GoAI exposes eight core functions: `GenerateText`, `StreamText`, `GenerateObject`, `StreamObject`, `Embed`, `EmbedMany`, `GenerateImage`, and `GenerateVideo`. Model capabilities vary by provider.
 
 ### Does GoAI SDK work with local models?
 

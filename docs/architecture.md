@@ -13,14 +13,14 @@ GoAI is a Go SDK that provides one unified API across 25+ LLM providers. This do
 ┌─────────────────────────────────────────────────────────────────┐
 │                        User Application                         │
 │  goai.GenerateText / StreamText / GenerateObject / StreamObject │
-│  goai.Embed / EmbedMany / GenerateImage                         │
+│  goai.Embed / EmbedMany / GenerateImage / GenerateVideo         │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
                     options, retry, caching
                                │
 ┌──────────────────────────────▼──────────────────────────────────┐
 │                     Provider Interfaces                         │
-│         LanguageModel · EmbeddingModel · ImageModel             │
+│    LanguageModel · EmbeddingModel · ImageModel · VideoModel     │
 └──┬─────────┬──────────┬──────────┬──────────┬─────────┬──────────┘
    │         │          │          │          │         │
 ┌──▼───┐ ┌───▼───┐ ┌───▼───┐ ┌───▼────┐ ┌───▼──┐ ┌───▼────────┐
@@ -59,7 +59,7 @@ GoAI is structured as three layers:
 
 ### 1. Core SDK (`goai` package)
 
-The top-level `goai` package exposes 7 core functions — the only public API that users interact with:
+The top-level `goai` package exposes 8 core functions — the only public API that users interact with:
 
 | Function            | File          | Description                                                |
 | ------------------- | ------------- | ---------------------------------------------------------- |
@@ -70,6 +70,7 @@ The top-level `goai` package exposes 7 core functions — the only public API th
 | `Embed`             | `embed.go`    | Single text embedding                                      |
 | `EmbedMany`         | `embed.go`    | Batch embeddings with auto-chunking and parallel execution |
 | `GenerateImage`     | `image.go`    | Image generation                                           |
+| `GenerateVideo`     | `video.go`    | Video generation with long-running operation polling       |
 
 Supporting modules in the core:
 
@@ -83,7 +84,7 @@ Supporting modules in the core:
 
 ### 2. Provider Interfaces (`provider` package)
 
-The `provider` package defines three model interfaces that all providers implement:
+The `provider` package defines four model interfaces that providers implement as applicable:
 
 ```go
 type LanguageModel interface {
@@ -102,9 +103,14 @@ type ImageModel interface {
     ModelID() string
     DoGenerate(ctx context.Context, params ImageParams) (*ImageResult, error)
 }
+
+type VideoModel interface {
+    ModelID() string
+    DoGenerate(ctx context.Context, params VideoParams) (*VideoResult, error)
+}
 ```
 
-The provider package also defines all shared types: `Message`, `Part`, `StreamChunk`, `Usage`, `ToolDefinition`, `ToolCall`, `Source`, and `ResponseMetadata`.
+The provider package also defines all shared types: `Message`, `Part`, `StreamChunk`, `Usage`, `ToolDefinition`, `ToolCall`, `Source`, `ResponseMetadata`, `VideoParams`, and `VideoData`.
 
 An optional `CapableModel` interface allows providers to declare feature support (temperature, reasoning, attachment, tool calling, modalities).
 
@@ -390,6 +396,7 @@ goai/
 ├── object.go               # GenerateObject[T], StreamObject[T], ObjectStream
 ├── embed.go                # Embed, EmbedMany (auto-chunking, parallel)
 ├── image.go                # GenerateImage
+├── video.go                # GenerateVideo
 ├── options.go              # Functional options (WithPrompt, WithTools, etc.)
 ├── schema.go               # SchemaFrom[T] — JSON Schema from Go structs
 ├── errors.go               # APIError, ContextOverflowError, overflow detection
@@ -397,7 +404,7 @@ goai/
 ├── caching.go              # Prompt cache control
 │
 ├── provider/
-│   ├── provider.go         # LanguageModel, EmbeddingModel, ImageModel interfaces
+│   ├── provider.go         # LanguageModel, EmbeddingModel, ImageModel, VideoModel interfaces
 │   ├── types.go            # Message, Part, StreamChunk, Usage, ToolDefinition, etc.
 │   ├── token.go            # TokenSource, CachedTokenSource, StaticToken
 │   │

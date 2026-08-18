@@ -20,6 +20,7 @@ GoAI SDK is a Go-native AI SDK supporting 25+ LLM providers with minimal depende
 | Prompt caching | ✅ auto | ❌ | ❌ | ❌ |
 | Embeddings | ✅ `Embed` / `EmbedMany` | ✅ | ✅ | ✅ |
 | Image generation | ✅ `GenerateImage` | ❌ | ❌ | ❌ |
+| Video generation | ✅ `GenerateVideo` (Google Veo) | ❌ | ❌ | ❌ |
 | Dependencies | **Minimal** (stdlib + oauth2) | Heavy | Medium | Minimal |
 | Inspired by | Vercel AI SDK | LangChain (Python) | Google ADK | — |
 | License | MIT | MIT | Apache 2.0 | MIT |

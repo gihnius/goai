@@ -1,6 +1,6 @@
 ---
 title: Google Gemini Provider
-description: "Use Google Gemini models in Go with GoAI. Supports chat, embeddings, image generation, Google Search grounding, and code execution tools."
+description: "Use Google Gemini models in Go with GoAI. Supports chat, embeddings, image and Veo video generation, Google Search grounding, and code execution tools."
 ---
 
 # Google
@@ -40,6 +40,7 @@ The provider also reads `GOOGLE_GENERATIVE_AI_BASE_URL` from the environment whe
 | `imagen-4.0-generate-001` | Image | Imagen via :predict endpoint |
 | `imagen-4.0-fast-generate-001` | Image | Imagen fast variant via :predict endpoint |
 | `gemini-2.5-flash-image` | Image | Gemini image via generateContent |
+| `veo-3.1-generate-preview` | Video | Veo via asynchronous predictLongRunning |
 
 ## Tested Models
 
@@ -57,7 +58,7 @@ E2E tested with real API calls. Last run: 2026-03-15.
 | `gemini-flash-latest` | PASS | PASS | Stable |
 | `gemini-flash-lite-latest` | PASS | PASS | Stable |
 
-Unit tested models: `gemini-2.5-flash`, `gemini-2.5-flash-image`, `imagen-4.0-generate-001`, `imagen-4.0-fast-generate-001`, `text-embedding-004`.
+Unit/integration tested models: `gemini-2.5-flash`, `gemini-2.5-flash-image`, `imagen-4.0-generate-001`, `imagen-4.0-fast-generate-001`, `text-embedding-004`, and `veo-3.1-generate-preview` (mock HTTP lifecycle). A credential-gated `e2e` test is available for a real Veo request; it is excluded from normal test runs to prevent accidental billing.
 
 ## Usage
 
@@ -173,6 +174,27 @@ result, err := goai.GenerateImage(ctx, model,
     goai.WithImagePrompt("A cartoon cat programming in Go"),
 )
 ```
+
+### Video Generation (Veo)
+
+Veo generation is asynchronous. GoAI starts the operation, polls it until completion, and downloads the authenticated video result.
+
+```go
+model := google.Video("veo-3.1-generate-preview")
+result, err := goai.GenerateVideo(ctx, model,
+    goai.WithVideoPrompt("A paper plane taking flight at sunrise"),
+    goai.WithVideoAspectRatio("16:9"),
+    goai.WithVideoResolution("720p"),
+    goai.WithVideoDuration(8*time.Second),
+    goai.WithVideoAudio(true),
+)
+if err != nil {
+    panic(err)
+}
+fmt.Printf("Generated %d bytes\n", len(result.Video.Data))
+```
+
+Use `WithVideoImage` for image-to-video generation. `WithVideoFrameImages` supports first and last frames, and `WithVideoInputReferences` accepts image references. The Gemini Developer API does not support the generic seed or FPS options.
 
 ## Options
 

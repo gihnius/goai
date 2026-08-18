@@ -668,6 +668,59 @@ type ResponseMetadata struct {
 	ProviderMetadata map[string]any
 }
 
+// VideoFrameType identifies the role of an image in video generation.
+type VideoFrameType string
+
+const (
+	VideoFrameFirst VideoFrameType = "first_frame"
+	VideoFrameLast  VideoFrameType = "last_frame"
+)
+
+// MediaData contains inline or remote media used by video generation.
+type MediaData struct {
+	Data      []byte
+	URL       string
+	MediaType string
+}
+
+// VideoFrame provides a role-tagged image for video generation.
+type VideoFrame struct {
+	Image MediaData
+	Type  VideoFrameType
+}
+
+// VideoParams contains provider-independent video generation parameters.
+type VideoParams struct {
+	Prompt          string
+	Image           *MediaData
+	N               int
+	AspectRatio     string
+	Resolution      string
+	Duration        time.Duration
+	FPS             int
+	Seed            *int64
+	FrameImages     []VideoFrame
+	InputReferences []MediaData
+	GenerateAudio   *bool
+	ProviderOptions map[string]any
+	MaxRetries      int
+	PollInterval    time.Duration
+	PollTimeout     time.Duration
+}
+
+// VideoResult is the response from video generation.
+type VideoResult struct {
+	Videos           []VideoData
+	ProviderMetadata map[string]map[string]any
+	Response         ResponseMetadata
+}
+
+// VideoData contains a single generated video.
+type VideoData struct {
+	Data      []byte
+	MediaType string
+}
+
 // ImageParams contains parameters for image generation.
 type ImageParams struct {
 	// Prompt describes the image to generate.

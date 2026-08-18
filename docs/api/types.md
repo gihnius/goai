@@ -130,6 +130,19 @@ type ImageResult struct {
 }
 ```
 
+### VideoResult
+
+The result of video generation. `Video` is the first generated video and `Videos` contains all results.
+
+```go
+type VideoResult struct {
+    Video            provider.VideoData
+    Videos           []provider.VideoData
+    ProviderMetadata map[string]map[string]any
+    Response         provider.ResponseMetadata
+}
+```
+
 ### SchemaFrom
 
 Generates a JSON Schema from a Go struct type `T`. Used by `GenerateObject` and `StreamObject` to describe the expected output structure, and compatible with OpenAI strict-mode schemas.
@@ -220,6 +233,14 @@ A function that configures an image generation call.
 
 ```go
 type ImageOption func(*imageOptions)
+```
+
+### VideoOption
+
+A function that configures a video generation call.
+
+```go
+type VideoOption func(*videoOptions)
 ```
 
 ### RequestInfo
@@ -442,6 +463,17 @@ Interface for image generation models.
 type ImageModel interface {
     ModelID() string
     DoGenerate(ctx context.Context, params ImageParams) (*ImageResult, error)
+}
+```
+
+### VideoModel
+
+Interface for video generation models.
+
+```go
+type VideoModel interface {
+    ModelID() string
+    DoGenerate(ctx context.Context, params VideoParams) (*VideoResult, error)
 }
 ```
 
@@ -778,6 +810,41 @@ type ImageResult struct {
     Response         ResponseMetadata            // Provider metadata.
 }
 ```
+
+### VideoParams
+
+Provider-independent video generation parameters, including prompt, input media, output settings, and polling configuration.
+
+```go
+type VideoParams struct {
+    Prompt          string
+    Image           *MediaData
+    N               int
+    AspectRatio     string
+    Resolution      string
+    Duration        time.Duration
+    FPS             int
+    Seed            *int64
+    FrameImages     []VideoFrame
+    InputReferences []MediaData
+    GenerateAudio   *bool
+    ProviderOptions map[string]any
+    MaxRetries      int
+    PollInterval    time.Duration
+    PollTimeout     time.Duration
+}
+```
+
+### VideoData
+
+```go
+type VideoData struct {
+    Data      []byte
+    MediaType string
+}
+```
+
+`MediaData` represents inline or remote media inputs. `VideoFrame` tags an image as `VideoFrameFirst` or `VideoFrameLast`.
 
 ### ResponseFormat
 
