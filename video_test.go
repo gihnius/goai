@@ -2,6 +2,7 @@ package goai
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -90,6 +91,9 @@ func TestGenerateVideo_Options(t *testing.T) {
 			if params.ProviderOptions["google"].(map[string]any)["negativePrompt"] != "rain" {
 				t.Errorf("provider options = %+v", params.ProviderOptions)
 			}
+			if params.PollInterval != time.Millisecond || params.PollTimeout != time.Second {
+				t.Errorf("poll interval/timeout = %v/%v", params.PollInterval, params.PollTimeout)
+			}
 			return &provider.VideoResult{
 				Videos: []provider.VideoData{{Data: []byte("video"), MediaType: "video/mp4"}},
 			}, nil
@@ -147,6 +151,48 @@ func TestGenerateVideo_PassesRetryBudgetToProvider(t *testing.T) {
 	_, err := GenerateVideo(t.Context(), model,
 		WithVideoPrompt("test"),
 		WithVideoMaxRetries(1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateVideo_ErrorAndEmptyResult(t *testing.T) {
+	t.Run("provider error", func(t *testing.T) {
+		want := errors.New("provider failed")
+		model := &mockVideoModel{generateFn: func(context.Context, provider.VideoParams) (*provider.VideoResult, error) {
+			return nil, want
+		}}
+		if _, err := GenerateVideo(t.Context(), model); !errors.Is(err, want) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("empty result", func(t *testing.T) {
+		model := &mockVideoModel{generateFn: func(context.Context, provider.VideoParams) (*provider.VideoResult, error) {
+			return &provider.VideoResult{}, nil
+		}}
+		if _, err := GenerateVideo(t.Context(), model); err == nil || err.Error() != "goai: no video generated" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+func TestVideoOptionClamps(t *testing.T) {
+	model := &mockVideoModel{generateFn: func(_ context.Context, params provider.VideoParams) (*provider.VideoResult, error) {
+		if params.N != 1 || params.MaxRetries != 0 {
+			t.Fatalf("params = %#v", params)
+		}
+		if params.PollInterval != defaultVideoPollInterval || params.PollTimeout != defaultVideoPollTimeout {
+			t.Fatalf("poll defaults = %v, %v", params.PollInterval, params.PollTimeout)
+		}
+		return &provider.VideoResult{Videos: []provider.VideoData{{Data: []byte("video")}}}, nil
+	}}
+	_, err := GenerateVideo(t.Context(), model,
+		WithVideoCount(0),
+		WithVideoMaxRetries(-1),
+		WithVideoPollInterval(0),
+		WithVideoPollTimeout(0),
 	)
 	if err != nil {
 		t.Fatal(err)
