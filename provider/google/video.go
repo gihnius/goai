@@ -382,7 +382,7 @@ func (m *videoModel) pollOperation(ctx context.Context, token string, operation 
 		if remaining <= 0 {
 			return googleVideoOperation{}, fmt.Errorf("google video generation timed out after %s", timeout)
 		}
-		delay := min(nextDelay, remaining)
+		delay := nextDelay
 		nextDelay = interval
 		timer := time.NewTimer(delay)
 		select {
@@ -431,18 +431,26 @@ func operationURL(baseURL, name string) (string, error) {
 	return strings.TrimRight(baseURL, "/") + "/v1beta/" + strings.TrimLeft(name, "/"), nil
 }
 
+func decodeVideoData(encoded string, remainingBytes int64, index int) ([]byte, error) {
+	if int64(base64.StdEncoding.DecodedLen(len(encoded))) > remainingBytes {
+		return nil, fmt.Errorf("video data exceeds %d byte download limit", maxGoogleVideoDownloadBytes)
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decoding video %d: %w", index, err)
+	}
+	return data, nil
+}
+
 func (m *videoModel) downloadVideos(ctx context.Context, token string, files []googleVideoFile) ([]provider.VideoData, error) {
 	videos := make([]provider.VideoData, 0, len(files))
 	remainingBytes := maxGoogleVideoDownloadBytes
 	for i, file := range files {
 		encoded := cmp.Or(file.BytesBase64Encoded, file.VideoBytes)
 		if encoded != "" {
-			if int64(base64.StdEncoding.DecodedLen(len(encoded))) > remainingBytes {
-				return nil, fmt.Errorf("video data exceeds %d byte download limit", maxGoogleVideoDownloadBytes)
-			}
-			data, err := base64.StdEncoding.DecodeString(encoded)
+			data, err := decodeVideoData(encoded, remainingBytes, i)
 			if err != nil {
-				return nil, fmt.Errorf("decoding video %d: %w", i, err)
+				return nil, err
 			}
 			remainingBytes -= int64(len(data))
 			videos = append(videos, provider.VideoData{Data: data, MediaType: cmp.Or(file.MimeType, "video/mp4")})

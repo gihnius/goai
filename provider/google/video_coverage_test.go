@@ -188,6 +188,11 @@ func TestVideo_InputValidation(t *testing.T) {
 			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("first"), MediaType: "image/png"}},
 			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("duplicate"), MediaType: "image/png"}},
 		}}, want: "duplicate first frame"},
+		{name: "duplicate last frame", params: provider.VideoParams{FrameImages: []provider.VideoFrame{
+			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("first"), MediaType: "image/png"}},
+			{Type: provider.VideoFrameLast, Image: provider.MediaData{Data: []byte("last"), MediaType: "image/png"}},
+			{Type: provider.VideoFrameLast, Image: provider.MediaData{Data: []byte("duplicate"), MediaType: "image/png"}},
+		}}, want: "duplicate last frame"},
 		{name: "last frame without start", params: provider.VideoParams{FrameImages: []provider.VideoFrame{
 			{Type: provider.VideoFrameLast, Image: provider.MediaData{Data: []byte("last"), MediaType: "image/png"}},
 		}}, want: "last frame requires an initial image or first frame"},
@@ -367,6 +372,31 @@ func TestVideo_PollAndOperationURLEdges(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
+
+	_, err = model.pollOperation(t.Context(), "key", googleVideoOperation{Name: "operations/expired"}, time.Hour, time.Nanosecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expired poll error = %v", err)
+	}
+
+	_, err = model.pollOperation(t.Context(), "key", googleVideoOperation{Name: "operations/wait-timeout"}, time.Second, 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("wait timeout error = %v", err)
+	}
+
+	nonRetryable := &videoModel{opts: options{
+		baseURL: "https://video.example.test",
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad request"}}`)),
+			}, nil
+		})},
+	}}
+	_, err = nonRetryable.pollOperation(t.Context(), "key", googleVideoOperation{Name: "operations/bad"}, time.Nanosecond, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("non-retryable poll error = %v", err)
+	}
 }
 
 func TestVideo_DownloadInlineAndErrors(t *testing.T) {
@@ -397,6 +427,10 @@ func TestVideo_DownloadInlineAndErrors(t *testing.T) {
 			}
 		})
 	}
+
+	if _, err := decodeVideoData(base64.StdEncoding.EncodeToString([]byte("video")), 2, 0); err == nil || !strings.Contains(err.Error(), "download limit") {
+		t.Fatalf("oversized inline error = %v", err)
+	}
 }
 
 func TestVideo_ReadAndRedirectHelpers(t *testing.T) {
@@ -422,6 +456,15 @@ func TestVideo_ReadAndRedirectHelpers(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://video.example.test/next", nil)
 	if err := client.CheckRedirect(req, nil); err == nil || !previousCalled.Load() {
 		t.Fatalf("redirect error = %v, previous called = %v", err, previousCalled.Load())
+	}
+
+	model.opts.headers = map[string]string{"X-Custom": "secret"}
+	client = model.downloadHTTPClient()
+	crossOrigin := httptest.NewRequest(http.MethodGet, "https://other.example.test/next", nil)
+	crossOrigin.Header.Set("x-goog-api-key", "key")
+	crossOrigin.Header.Set("X-Custom", "secret")
+	if err := client.CheckRedirect(crossOrigin, nil); err == nil || crossOrigin.Header.Get("x-goog-api-key") != "" || crossOrigin.Header.Get("X-Custom") != "" {
+		t.Fatalf("cross-origin redirect error = %v, headers = %v", err, crossOrigin.Header)
 	}
 
 	model.opts.httpClient = &http.Client{}

@@ -452,6 +452,67 @@ func TestVideo_LimitsDownloadErrorBody(t *testing.T) {
 	}
 }
 
+func TestVideo_DownloadResponseEdges(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  *http.Response
+		wantError string
+		wantType  string
+	}{
+		{
+			name: "error response read failure",
+			response: &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       &failReader{},
+			},
+			wantError: "error response",
+		},
+		{
+			name: "successful response read failure",
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       &failReader{},
+			},
+			wantError: "reading video",
+		},
+		{
+			name: "media type fallback",
+			response: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("video")),
+			},
+			wantType: "video/webm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &videoModel{opts: options{
+				baseURL: "https://video.example.test",
+				httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return tt.response, nil
+				})},
+			}}
+			videos, err := model.downloadVideos(t.Context(), "key", []googleVideoFile{{
+				URI:      "https://video.example.test/video",
+				MimeType: "video/webm",
+			}})
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("error = %v, want %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || len(videos) != 1 || videos[0].MediaType != tt.wantType {
+				t.Fatalf("videos = %#v, error = %v", videos, err)
+			}
+		})
+	}
+}
+
 func TestVideo_CancelsStartRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
