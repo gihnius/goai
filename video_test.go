@@ -176,6 +176,15 @@ func TestGenerateVideo_ErrorAndEmptyResult(t *testing.T) {
 			t.Fatalf("error = %v", err)
 		}
 	})
+
+	t.Run("nil result", func(t *testing.T) {
+		model := &mockVideoModel{generateFn: func(context.Context, provider.VideoParams) (*provider.VideoResult, error) {
+			return nil, nil
+		}}
+		if _, err := GenerateVideo(t.Context(), model); err == nil || err.Error() != "goai: no video generated" {
+			t.Fatalf("error = %v", err)
+		}
+	})
 }
 
 func TestVideoOptionClamps(t *testing.T) {

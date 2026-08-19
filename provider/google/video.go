@@ -24,6 +24,7 @@ var _ provider.VideoModel = (*videoModel)(nil)
 
 const (
 	maxGoogleVideoOperationBytes int64 = 10 << 20
+	maxGoogleVideoErrorBytes     int64 = 1 << 20
 	maxGoogleVideoDownloadBytes  int64 = 512 << 20
 )
 
@@ -60,6 +61,9 @@ func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams
 	}
 
 	instance := map[string]any{"prompt": params.Prompt}
+	if len(params.FrameImages) > 0 && len(params.InputReferences) > 0 {
+		return nil, errors.New("google Gemini video generation cannot combine frame images with input references")
+	}
 	if params.Image != nil {
 		encoded, err := encodeVideoMedia(*params.Image)
 		if err != nil {
@@ -67,7 +71,25 @@ func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams
 		}
 		instance["image"] = encoded
 	}
+	hasFirstFrame := params.Image != nil
+	seenFirstFrame := false
+	seenLastFrame := false
 	for _, frame := range params.FrameImages {
+		switch frame.Type {
+		case provider.VideoFrameFirst:
+			if seenFirstFrame {
+				return nil, errors.New("google Gemini video generation received a duplicate first frame")
+			}
+			seenFirstFrame = true
+			hasFirstFrame = true
+		case provider.VideoFrameLast:
+			if seenLastFrame {
+				return nil, errors.New("google Gemini video generation received a duplicate last frame")
+			}
+			seenLastFrame = true
+		default:
+			return nil, fmt.Errorf("google Gemini video generation received unsupported frame type %q", frame.Type)
+		}
 		encoded, err := encodeVideoMedia(frame.Image)
 		if err != nil {
 			return nil, err
@@ -79,13 +101,21 @@ func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams
 			instance["lastFrame"] = encoded
 		}
 	}
+	if seenLastFrame && !hasFirstFrame {
+		return nil, errors.New("google Gemini video generation last frame requires an initial image or first frame")
+	}
 
 	parameters := map[string]any{"sampleCount": params.N}
 	if params.AspectRatio != "" {
 		parameters["aspectRatio"] = params.AspectRatio
 	}
 	if params.Resolution != "" {
-		parameters["resolution"] = params.Resolution
+		resolution := map[string]string{
+			"1280x720":  "720p",
+			"1920x1080": "1080p",
+			"3840x2160": "4k",
+		}[params.Resolution]
+		parameters["resolution"] = cmp.Or(resolution, params.Resolution)
 	}
 	if params.Duration > 0 {
 		parameters["durationSeconds"] = int(params.Duration / time.Second)
@@ -94,7 +124,7 @@ func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams
 		return nil, errors.New("google Gemini video generation does not support fps")
 	}
 	if params.Seed != nil {
-		return nil, errors.New("google Gemini video generation does not support seed")
+		parameters["seed"] = *params.Seed
 	}
 	if params.GenerateAudio != nil {
 		parameters["generateAudio"] = *params.GenerateAudio
@@ -107,7 +137,7 @@ func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams
 	if len(params.InputReferences) > 0 {
 		references := make([]map[string]any, 0, len(params.InputReferences))
 		for _, reference := range params.InputReferences {
-			if strings.HasPrefix(reference.MediaType, "video/") {
+			if !strings.HasPrefix(reference.MediaType, "image/") {
 				return nil, errors.New("google Gemini video generation only supports image references")
 			}
 			encoded, err := encodeVideoMedia(reference)
@@ -163,6 +193,12 @@ func encodeVideoMedia(media provider.MediaData) (map[string]any, error) {
 	}
 	if len(media.Data) == 0 {
 		return nil, errors.New("google Gemini video generation received empty image data")
+	}
+	if !strings.HasPrefix(media.MediaType, "image/") {
+		return nil, errors.New("google Gemini video generation requires an image media type")
+	}
+	if media.MediaType != "image/png" && media.MediaType != "image/jpeg" {
+		return nil, errors.New("google Gemini video generation requires a PNG or JPEG image")
 	}
 	return map[string]any{
 		"bytesBase64Encoded": base64.StdEncoding.EncodeToString(media.Data),
@@ -425,6 +461,14 @@ func (m *videoModel) downloadVideos(ctx context.Context, token string, files []g
 		if err != nil {
 			return nil, fmt.Errorf("downloading video %d: %w", i, err)
 		}
+		if resp.StatusCode != http.StatusOK {
+			data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGoogleVideoErrorBytes))
+			_ = resp.Body.Close()
+			if readErr != nil {
+				return nil, fmt.Errorf("reading video %d error response: %w", i, readErr)
+			}
+			return nil, goai.ParseHTTPErrorWithHeaders("google", resp.StatusCode, data, resp.Header)
+		}
 		if resp.ContentLength > remainingBytes {
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("video data exceeds %d byte download limit", maxGoogleVideoDownloadBytes)
@@ -433,9 +477,6 @@ func (m *videoModel) downloadVideos(ctx context.Context, token string, files []g
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("reading video %d: %w", i, readErr)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, goai.ParseHTTPErrorWithHeaders("google", resp.StatusCode, data, resp.Header)
 		}
 		remainingBytes -= int64(len(data))
 		mediaType := resp.Header.Get("Content-Type")

@@ -57,7 +57,7 @@ func GenerateVideo(ctx context.Context, model provider.VideoModel, opts ...Video
 	if err != nil {
 		return nil, err
 	}
-	if len(result.Videos) == 0 {
+	if result == nil || len(result.Videos) == 0 {
 		return nil, errors.New("goai: no video generated")
 	}
 

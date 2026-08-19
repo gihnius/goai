@@ -194,7 +194,7 @@ if err != nil {
 fmt.Printf("Generated %d bytes\n", len(result.Video.Data))
 ```
 
-Use `WithVideoImage` for image-to-video generation. `WithVideoFrameImages` supports first and last frames, and `WithVideoInputReferences` accepts image references. The Gemini Developer API does not support the generic seed or FPS options.
+Use `WithVideoImage` for image-to-video generation. `WithVideoFrameImages` supports first and last frames, while `WithVideoInputReferences` accepts image references; Veo does not allow combining those two modes. Common pixel resolutions are translated to Google's `720p`, `1080p`, and `4k` values. The Gemini Developer API supports `WithVideoSeed` but not the generic FPS option.
 
 ## Options
 

@@ -80,7 +80,7 @@ func TestVideo_RequestOptionsAndInlineResult(t *testing.T) {
 			t.Fatal(err)
 		}
 		instance := body.Instances[0]
-		if instance["image"] == nil || instance["lastFrame"] == nil || instance["referenceImages"] == nil {
+		if instance["image"] == nil || instance["lastFrame"] == nil {
 			t.Fatalf("instance = %#v", instance)
 		}
 		if body.Parameters["resolution"] != "720p" || body.Parameters["negativePrompt"] != "rain" {
@@ -106,7 +106,6 @@ func TestVideo_RequestOptionsAndInlineResult(t *testing.T) {
 			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("first"), MediaType: "image/png"}},
 			{Type: provider.VideoFrameLast, Image: provider.MediaData{Data: []byte("last"), MediaType: "image/png"}},
 		},
-		InputReferences: []provider.MediaData{{Data: []byte("reference"), MediaType: "image/png"}},
 		ProviderOptions: map[string]any{"google": map[string]any{"negativePrompt": "rain"}},
 	})
 	if err != nil {
@@ -117,8 +116,63 @@ func TestVideo_RequestOptionsAndInlineResult(t *testing.T) {
 	}
 }
 
+func TestVideo_InputReferences(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Instances []map[string]any `json:"instances"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Instances) != 1 || body.Instances[0]["referenceImages"] == nil {
+			t.Fatalf("instances = %#v", body.Instances)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"operations/references","done":true,"response":{"generateVideoResponse":{"generatedSamples":[{"video":{"videoBytes":"dmlkZW8="}}]}}}`)
+	}))
+	defer server.Close()
+
+	model := Video("veo-test", WithAPIKey("key"), WithBaseURL(server.URL))
+	_, err := model.DoGenerate(t.Context(), provider.VideoParams{
+		Prompt:          "test",
+		N:               1,
+		InputReferences: []provider.MediaData{{Data: []byte("reference"), MediaType: "image/png"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVideo_MapsSeedAndResolution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Parameters map[string]any `json:"parameters"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Parameters["seed"] != float64(42) || body.Parameters["resolution"] != "1080p" {
+			t.Fatalf("parameters = %#v", body.Parameters)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"operations/options","done":true,"response":{"generateVideoResponse":{"generatedSamples":[{"video":{"videoBytes":"dmlkZW8="}}]}}}`)
+	}))
+	defer server.Close()
+
+	seed := int64(42)
+	model := Video("veo-test", WithAPIKey("key"), WithBaseURL(server.URL))
+	_, err := model.DoGenerate(t.Context(), provider.VideoParams{
+		Prompt:     "test",
+		N:          1,
+		Resolution: "1920x1080",
+		Seed:       &seed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVideo_InputValidation(t *testing.T) {
-	seed := int64(1)
 	tests := []struct {
 		name   string
 		params provider.VideoParams
@@ -126,11 +180,25 @@ func TestVideo_InputValidation(t *testing.T) {
 	}{
 		{name: "image URL", params: provider.VideoParams{Image: &provider.MediaData{URL: "https://example.com/image.png"}}, want: "inline image data"},
 		{name: "empty image", params: provider.VideoParams{Image: &provider.MediaData{}}, want: "empty image data"},
+		{name: "non-image input", params: provider.VideoParams{Image: &provider.MediaData{Data: []byte("audio"), MediaType: "audio/mpeg"}}, want: "requires an image media type"},
+		{name: "unsupported image input", params: provider.VideoParams{Image: &provider.MediaData{Data: []byte("gif"), MediaType: "image/gif"}}, want: "requires a PNG or JPEG image"},
 		{name: "frame URL", params: provider.VideoParams{FrameImages: []provider.VideoFrame{{Type: provider.VideoFrameFirst, Image: provider.MediaData{URL: "https://example.com/image.png"}}}}, want: "inline image data"},
+		{name: "invalid frame type", params: provider.VideoParams{FrameImages: []provider.VideoFrame{{Type: "middle_frame", Image: provider.MediaData{Data: []byte("image"), MediaType: "image/png"}}}}, want: "unsupported frame type"},
+		{name: "duplicate first frame", params: provider.VideoParams{FrameImages: []provider.VideoFrame{
+			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("first"), MediaType: "image/png"}},
+			{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("duplicate"), MediaType: "image/png"}},
+		}}, want: "duplicate first frame"},
+		{name: "last frame without start", params: provider.VideoParams{FrameImages: []provider.VideoFrame{
+			{Type: provider.VideoFrameLast, Image: provider.MediaData{Data: []byte("last"), MediaType: "image/png"}},
+		}}, want: "last frame requires an initial image or first frame"},
 		{name: "fps", params: provider.VideoParams{FPS: 24}, want: "does not support fps"},
-		{name: "seed", params: provider.VideoParams{Seed: &seed}, want: "does not support seed"},
 		{name: "video reference", params: provider.VideoParams{InputReferences: []provider.MediaData{{Data: []byte("video"), MediaType: "video/mp4"}}}, want: "only supports image references"},
+		{name: "non-image reference", params: provider.VideoParams{InputReferences: []provider.MediaData{{Data: []byte("audio"), MediaType: "audio/mpeg"}}}, want: "only supports image references"},
 		{name: "reference URL", params: provider.VideoParams{InputReferences: []provider.MediaData{{URL: "https://example.com/image.png", MediaType: "image/png"}}}, want: "inline image data"},
+		{name: "frames with references", params: provider.VideoParams{
+			FrameImages:     []provider.VideoFrame{{Type: provider.VideoFrameFirst, Image: provider.MediaData{Data: []byte("frame"), MediaType: "image/png"}}},
+			InputReferences: []provider.MediaData{{Data: []byte("reference"), MediaType: "image/png"}},
+		}, want: "cannot combine frame images with input references"},
 	}
 	model := &videoModel{id: "veo-test", opts: options{tokenSource: provider.StaticToken("key"), baseURL: "http://127.0.0.1:1"}}
 	for _, tt := range tests {

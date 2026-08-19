@@ -1,9 +1,12 @@
 package google
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -425,6 +428,88 @@ func TestVideo_RejectsOversizedDownload(t *testing.T) {
 		t.Fatalf("error = %v, want download limit error", err)
 	}
 }
+
+func TestVideo_LimitsDownloadErrorBody(t *testing.T) {
+	body := &countingVideoBody{remaining: 2 << 20}
+	model := &videoModel{opts: options{
+		baseURL:     "https://video.example.test",
+		tokenSource: provider.StaticToken("key"),
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		})},
+	}}
+
+	_, err := model.downloadVideos(t.Context(), "key", []googleVideoFile{{URI: "https://video.example.test/video.mp4"}})
+	if err == nil {
+		t.Fatal("expected download error")
+	}
+	if body.read > (1<<20)+1 {
+		t.Fatalf("read %d error-body bytes, want at most %d", body.read, (1<<20)+1)
+	}
+}
+
+func TestVideo_CancelsStartRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	model := Video(
+		"veo-test",
+		WithAPIKey("key"),
+		WithBaseURL("https://video.example.test"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})}),
+	)
+	_, err := model.DoGenerate(ctx, provider.VideoParams{Prompt: "test", N: 1})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestVideo_CancelsDownloadRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	model := Video(
+		"veo-test",
+		WithAPIKey("key"),
+		WithBaseURL("https://video.example.test"),
+		WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})}),
+	).(*videoModel)
+	_, err := model.downloadVideos(ctx, "key", []googleVideoFile{{URI: "https://video.example.test/video.mp4"}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+}
+
+type countingVideoBody struct {
+	remaining int64
+	read      int64
+}
+
+func (b *countingVideoBody) Read(p []byte) (int, error) {
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > b.remaining {
+		n = b.remaining
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = 'x'
+	}
+	b.remaining -= n
+	b.read += n
+	return int(n), nil
+}
+
+func (*countingVideoBody) Close() error { return nil }
 
 func TestVideo_PollTimeoutBoundsInFlightRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
