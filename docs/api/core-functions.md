@@ -1,6 +1,6 @@
 ---
 title: Core Functions
-description: "API reference for GoAI's core functions including GenerateText, StreamText, GenerateObject, StreamObject, Embed, EmbedMany, and GenerateImage."
+description: "API reference for GoAI's core functions including GenerateText, StreamText, GenerateObject, StreamObject, Embed, EmbedMany, GenerateImage, and GenerateVideo."
 ---
 
 # Core Functions
@@ -374,6 +374,34 @@ if err != nil {
     log.Fatal(err)
 }
 fmt.Printf("Generated %d image(s)\n", len(result.Images))
+```
+
+---
+
+## GenerateVideo
+
+Generates videos from text and media prompts. Long-running provider operations are polled until completion.
+
+```go
+func GenerateVideo(ctx context.Context, model provider.VideoModel, opts ...VideoOption) (*VideoResult, error)
+```
+
+**Parameters:**
+
+| Name    | Type                  | Description                                                        |
+| ------- | --------------------- | ------------------------------------------------------------------ |
+| `ctx`   | `context.Context`     | Request context.                                                   |
+| `model` | `provider.VideoModel` | The video model to use.                                            |
+| `opts`  | `...VideoOption`      | Video prompt, media, output settings, retry, timeout, and polling. |
+
+**Returns:** `*VideoResult` with `Video` for the first result and `Videos` for all generated videos.
+
+```go
+result, err := goai.GenerateVideo(ctx, google.Video("veo-3.1-generate-preview"),
+    goai.WithVideoPrompt("A cinematic ocean scene"),
+    goai.WithVideoAspectRatio("16:9"),
+    goai.WithVideoDuration(8*time.Second),
+)
 ```
 
 ---

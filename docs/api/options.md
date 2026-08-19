@@ -1,11 +1,11 @@
 ---
 title: Options
-description: "Reference for all GoAI option functions. Configure prompts, tools, temperature, retries, streaming, structured output, embeddings, and image generation."
+description: "Reference for all GoAI option functions. Configure prompts, tools, temperature, retries, streaming, structured output, embeddings, image generation, and video generation."
 ---
 
 # Options
 
-All option functions for configuring GoAI calls. Options follow the functional options pattern - pass them as variadic arguments to `GenerateText`, `StreamText`, `GenerateObject`, `StreamObject`, `Embed`, or `EmbedMany`.
+All option functions for configuring GoAI calls. Options follow the functional options pattern. Text, object, and embedding calls use `Option`; image and video generation use their dedicated option types.
 
 Import: `github.com/zendev-sh/goai`
 
@@ -32,6 +32,8 @@ func WithPrompt(s string) Option
 ```
 
 **Default:** empty.
+
+---
 
 Use `WithPrompt` for simple single-turn requests. Use `WithMessages` for multi-turn conversations.
 
@@ -596,3 +598,28 @@ func WithImageProviderOptions(opts map[string]any) ImageOption
 ```
 
 **Default:** empty.
+
+---
+
+## Video Options
+
+These options use the separate `VideoOption` type and apply only to `GenerateVideo`.
+
+| Option | Description | Default |
+| ------ | ----------- | ------- |
+| `WithVideoPrompt(string)` | Text prompt. | Empty |
+| `WithVideoImage(provider.MediaData)` | Initial image for image-to-video. | None |
+| `WithVideoCount(int)` | Number of videos. | `1` |
+| `WithVideoAspectRatio(string)` | Output ratio such as `"16:9"`. | Provider default |
+| `WithVideoResolution(string)` | Provider-supported resolution. | Provider default |
+| `WithVideoDuration(time.Duration)` | Requested duration. | Provider default |
+| `WithVideoFPS(int)` | Frames per second when supported. | Provider default |
+| `WithVideoSeed(int64)` | Deterministic seed when supported. | None |
+| `WithVideoFrameImages(...provider.VideoFrame)` | First/last frame images. | None |
+| `WithVideoInputReferences(...provider.MediaData)` | Reference media. | None |
+| `WithVideoAudio(bool)` | Generate audio with video. | Provider default |
+| `WithVideoProviderOptions(map[string]any)` | Provider-specific parameters. | Empty |
+| `WithVideoMaxRetries(int)` | Retries for rate-limited generation-start requests. Ambiguous network and 5xx failures are not replayed. | `2` |
+| `WithVideoTimeout(time.Duration)` | Overall call timeout. | Context only |
+| `WithVideoPollInterval(time.Duration)` | Operation polling interval. | `5s` |
+| `WithVideoPollTimeout(time.Duration)` | Maximum polling duration. | `10m` |
