@@ -640,7 +640,7 @@ func convertMessages(msgs []provider.Message) []map[string]any {
 					p := map[string]any{
 						"type": "document",
 						"source": map[string]any{
-							"type":    "file",
+							"type":   "file",
 							"file_id": part.RemoteRef.ID,
 						},
 					}
@@ -1274,6 +1274,7 @@ var serverToolResultBlockTypes = map[string]bool{
 	"bash_code_execution_tool_result":        true,
 	"text_editor_code_execution_tool_result": true,
 	"mcp_tool_result":                        true,
+	"tool_search_tool_result":                true,
 }
 
 func isServerToolResultBlock(t string) bool {
