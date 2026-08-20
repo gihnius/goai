@@ -667,6 +667,7 @@ func buildParams(opts options) provider.GenerateParams {
 			InputSchema:            t.InputSchema,
 			ProviderDefinedType:    t.ProviderDefinedType,
 			ProviderDefinedOptions: t.ProviderDefinedOptions,
+			DeferLoading:           t.DeferLoading,
 		})
 	}
 
