@@ -354,8 +354,9 @@ func convertToResponsesInput(msgs []provider.Message) []map[string]any {
 					items = append(items, message)
 				}
 				messageContent = append(messageContent, map[string]any{
-					"type": "output_text",
-					"text": text,
+					"type":        "output_text",
+					"text":        text,
+					"annotations": []any{},
 				})
 				message["content"] = messageContent
 			}
