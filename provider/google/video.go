@@ -55,6 +55,9 @@ type videoModel struct {
 func (m *videoModel) ModelID() string { return m.id }
 
 func (m *videoModel) DoGenerate(ctx context.Context, params provider.VideoParams) (*provider.VideoResult, error) {
+	if err := validateNonChatOptions(m.opts); err != nil {
+		return nil, err
+	}
 	token, err := m.resolveToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving auth token: %w", err)

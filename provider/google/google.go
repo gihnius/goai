@@ -1058,6 +1058,13 @@ func (m *chatModel) resolveToken(ctx context.Context) (string, error) {
 	return m.opts.tokenSource.Token(ctx)
 }
 
+func validateNonChatOptions(o options) error {
+	if o.isVertex {
+		return errors.New("google: WithVertex is only supported by Chat; use provider/vertex for other model types")
+	}
+	return nil
+}
+
 // --- Schema sanitization ---
 
 // sanitizeGeminiSchema delegates to the shared internal implementation.
