@@ -34,6 +34,8 @@ var (
 	_ provider.LanguageModel          = (*chatModel)(nil)
 	_ provider.CapableModel           = (*chatModel)(nil)
 	_ provider.FileUploadCapableModel = (*chatModel)(nil)
+	_ provider.LanguageModel          = (*vertexChatModel)(nil)
+	_ provider.CapableModel           = (*vertexChatModel)(nil)
 )
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com"
@@ -43,6 +45,7 @@ type Option func(*options)
 
 type options struct {
 	tokenSource provider.TokenSource
+	usesAPIKey  bool
 	baseURL     string
 	headers     map[string]string
 	httpClient  *http.Client
@@ -51,15 +54,17 @@ type options struct {
 	// {location}-aiplatform.googleapis.com endpoints and authenticate with a
 	// Bearer OAuth token instead of the x-goog-api-key header. The native wire
 	// format (serialization, SSE, thinking, grounding) is identical.
-	isVertex bool
-	project  string
-	location string
+	isVertex      bool
+	project       string
+	location      string
+	vertexBaseURL string
 }
 
 // WithAPIKey sets a static API key for authentication.
 func WithAPIKey(key string) Option {
 	return func(o *options) {
 		o.tokenSource = provider.StaticToken(key)
+		o.usesAPIKey = true
 	}
 }
 
@@ -67,6 +72,7 @@ func WithAPIKey(key string) Option {
 func WithTokenSource(ts provider.TokenSource) Option {
 	return func(o *options) {
 		o.tokenSource = ts
+		o.usesAPIKey = false
 	}
 }
 
@@ -79,6 +85,14 @@ func WithVertex(project, location string) Option {
 		o.isVertex = true
 		o.project = project
 		o.location = location
+	}
+}
+
+// WithVertexBaseURL overrides the Vertex models collection URL. The model ID
+// and action are appended to this URL. It has no effect outside Vertex mode.
+func WithVertexBaseURL(url string) Option {
+	return func(o *options) {
+		o.vertexBaseURL = url
 	}
 }
 
@@ -112,21 +126,25 @@ func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	// Resolve API key from env if not set.
 	// Support both GOOGLE_GENERATIVE_AI_API_KEY (Vercel AI SDK convention)
 	// and GEMINI_API_KEY (Google's own convention / models.dev).
-	if o.tokenSource == nil {
+	if !o.isVertex && o.tokenSource == nil {
 		if key := cmp.Or(os.Getenv("GOOGLE_GENERATIVE_AI_API_KEY"), os.Getenv("GEMINI_API_KEY")); key != "" {
 			o.tokenSource = provider.StaticToken(key)
 		}
 	}
 	// Resolve base URL from env if not overridden.
-	if o.baseURL == defaultBaseURL {
+	if !o.isVertex && o.baseURL == defaultBaseURL {
 		if base := os.Getenv("GOOGLE_GENERATIVE_AI_BASE_URL"); base != "" {
 			o.baseURL = base
 		}
 	}
-	return &chatModel{
+	model := &chatModel{
 		id:   modelID,
 		opts: o,
 	}
+	if o.isVertex {
+		return &vertexChatModel{model: model}
+	}
+	return model
 }
 
 type chatModel struct {
@@ -154,6 +172,29 @@ func (m *chatModel) Capabilities() provider.ModelCapabilities {
 
 func (m *chatModel) FileUploader() provider.FileUploader {
 	return &fileUploader{opts: m.opts}
+}
+
+// vertexChatModel deliberately does not implement FileUploadCapableModel.
+// Vertex native Gemini endpoints do not support the Gemini Developer API's
+// Files API used by chatModel.FileUploader.
+type vertexChatModel struct {
+	model *chatModel
+}
+
+func (m *vertexChatModel) ModelID() string { return m.model.ModelID() }
+
+func (m *vertexChatModel) Capabilities() provider.ModelCapabilities {
+	caps := m.model.Capabilities()
+	caps.FileUpload = false
+	return caps
+}
+
+func (m *vertexChatModel) DoGenerate(ctx context.Context, params provider.GenerateParams) (*provider.GenerateResult, error) {
+	return m.model.DoGenerate(ctx, params)
+}
+
+func (m *vertexChatModel) DoStream(ctx context.Context, params provider.GenerateParams) (*provider.StreamResult, error) {
+	return m.model.DoStream(ctx, params)
 }
 
 func (m *chatModel) DoGenerate(ctx context.Context, params provider.GenerateParams) (*provider.GenerateResult, error) {
@@ -975,8 +1016,7 @@ func (m *chatModel) httpClient() *http.Client {
 
 // endpointURL builds the request URL for an action (generateContent /
 // streamGenerateContent). In Vertex mode it targets the aiplatform publisher
-// endpoint; otherwise the generativelanguage base URL. A WithBaseURL override
-// wins in Vertex mode too (testing/proxy).
+// endpoint; otherwise the generativelanguage base URL.
 func (m *chatModel) endpointURL(action, query string) (string, error) {
 	if !m.opts.isVertex {
 		return fmt.Sprintf("%s/v1beta/models/%s:%s%s", m.opts.baseURL, url.PathEscape(m.id), action, query), nil
@@ -987,7 +1027,7 @@ func (m *chatModel) endpointURL(action, query string) (string, error) {
 	if !validGCPIdentifier(m.opts.location) {
 		return "", fmt.Errorf("google: invalid vertex location %q", m.opts.location)
 	}
-	if base := strings.TrimRight(m.opts.baseURL, "/"); base != defaultBaseURL && base != "" {
+	if base := strings.TrimRight(m.opts.vertexBaseURL, "/"); base != "" {
 		return fmt.Sprintf("%s/%s:%s%s", base, url.PathEscape(m.id), action, query), nil
 	}
 	// The "global" region has no location prefix on the hostname.
@@ -1009,6 +1049,9 @@ func validGCPIdentifier(s string) bool {
 }
 
 func (m *chatModel) resolveToken(ctx context.Context) (string, error) {
+	if m.opts.isVertex && m.opts.usesAPIKey {
+		return "", errors.New("google: WithVertex requires an OAuth token source; API keys are not supported")
+	}
 	if m.opts.tokenSource == nil {
 		return "", errors.New("goai: no API key or token source configured")
 	}

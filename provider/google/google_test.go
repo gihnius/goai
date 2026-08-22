@@ -28,6 +28,7 @@ type failTokenSource struct{}
 func (f failTokenSource) Token(_ context.Context) (string, error) {
 	return "", fmt.Errorf("token error")
 }
+
 type googleRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f googleRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -3369,7 +3370,7 @@ func TestChat_Vertex_Generate_BearerAuth(t *testing.T) {
 	model := Chat("gemini-2.5-pro",
 		WithTokenSource(provider.StaticToken("oauth-token")),
 		WithVertex("my-proj", "us-central1"),
-		WithBaseURL(server.URL))
+		WithVertexBaseURL(server.URL))
 
 	res, err := model.DoGenerate(context.Background(), provider.GenerateParams{
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
@@ -3379,6 +3380,70 @@ func TestChat_Vertex_Generate_BearerAuth(t *testing.T) {
 	}
 	if res.Text != "hola" {
 		t.Errorf("text = %q, want hola", res.Text)
+	}
+}
+
+func TestChat_Vertex_IgnoresGeminiEnvironment(t *testing.T) {
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "gemini-api-key")
+	t.Setenv("GEMINI_API_KEY", "gemini-fallback-key")
+	t.Setenv("GOOGLE_GENERATIVE_AI_BASE_URL", "https://gemini.example.test")
+
+	model := Chat("gemini-2.5-pro", WithVertex("my-proj", "us-central1"))
+	vertexModel, ok := model.(*vertexChatModel)
+	if !ok {
+		t.Fatalf("Chat() type = %T, want *vertexChatModel", model)
+	}
+	if vertexModel.model.opts.tokenSource != nil {
+		t.Error("Vertex mode must not use a Gemini API key from the environment")
+	}
+	if vertexModel.model.opts.baseURL != defaultBaseURL {
+		t.Errorf("Vertex baseURL = %q, want default %q", vertexModel.model.opts.baseURL, defaultBaseURL)
+	}
+}
+
+func TestChat_Vertex_RejectsAPIKey(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithVertex("my-proj", "us-central1"),
+		WithAPIKey("gemini-api-key"))
+
+	_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "OAuth token source") {
+		t.Fatalf("DoGenerate() error = %v, want OAuth token source error", err)
+	}
+}
+
+func TestChat_Vertex_DoesNotAdvertiseFileUpload(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		WithVertex("my-proj", "us-central1"))
+
+	if _, ok := model.(provider.FileUploadCapableModel); ok {
+		t.Fatalf("Vertex model type %T must not implement FileUploadCapableModel", model)
+	}
+	if caps := provider.ModelCapabilitiesOf(model); caps.FileUpload {
+		t.Error("Vertex model must not advertise file upload")
+	}
+	if got := model.ModelID(); got != "gemini-2.5-pro" {
+		t.Errorf("ModelID() = %q, want gemini-2.5-pro", got)
+	}
+}
+
+func TestChat_Vertex_WithBaseURLDoesNotOverrideVertexEndpoint(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		WithVertex("my-proj", "us-central1"),
+		WithBaseURL("https://gemini.example.test"))
+	vertexModel := model.(*vertexChatModel)
+
+	got, err := vertexModel.model.endpointURL("generateContent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+	if got != want {
+		t.Errorf("endpointURL() = %q, want %q", got, want)
 	}
 }
 
@@ -3420,11 +3485,11 @@ func TestChat_Vertex_BearerAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// WithBaseURL wins in vertex mode (testing), but auth still goes Bearer.
+	// Vertex endpoint overrides are separate from Gemini API base URL overrides.
 	model := Chat("gemini-2.5-pro",
 		WithTokenSource(provider.StaticToken("oauth-token")),
 		WithVertex("my-proj", "us-central1"),
-		WithBaseURL(server.URL))
+		WithVertexBaseURL(server.URL))
 
 	res, err := model.DoStream(context.Background(), provider.GenerateParams{
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
