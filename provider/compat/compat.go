@@ -20,22 +20,22 @@ import (
 type Option func(*options)
 
 type options struct {
-	providerID           string
-	tokenSource          provider.TokenSource
-	baseURL              string
-	headers              map[string]string
-	httpClient           *http.Client
-	usesCompletionTokens *bool
+	providerID             string
+	tokenSource            provider.TokenSource
+	baseURL                string
+	headers                map[string]string
+	httpClient             *http.Client
+	useMaxCompletionTokens *bool
 }
 
-// WithCompletionTokens forces the max_tokens / max_completion_tokens choice
+// WithMaxCompletionTokens forces the max_tokens / max_completion_tokens choice
 // instead of deriving it from the model id. Use it when the id does not
 // identify the model: on Azure OpenAI the wire id is the deployment name the
 // user picked, so a GPT-5 deployment called "prod" would be sent max_tokens
 // and rejected with "Unsupported parameter: 'max_tokens'".
-func WithCompletionTokens(uses bool) Option {
+func WithMaxCompletionTokens(use bool) Option {
 	return func(o *options) {
-		o.usesCompletionTokens = &uses
+		o.useMaxCompletionTokens = &use
 	}
 }
 
@@ -84,18 +84,18 @@ func resolveOptions(opts []Option) options {
 func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	o := resolveOptions(opts)
 	return openaicompat.NewChatModel(openaicompat.ChatModelConfig{
-		ProviderID:           o.providerID,
-		ModelID:              modelID,
-		BaseURL:              o.baseURL,
-		BaseURLRequired:      true,
-		TokenSource:          o.tokenSource,
-		TokenRequired:        false,
-		Headers:              o.headers,
-		HTTPClient:           o.httpClient,
-		Capabilities:         chatCaps,
-		IncludeStreamOptions: true,
-		WarnPromptCaching:    true,
-		UsesCompletionTokens: o.usesCompletionTokens,
+		ProviderID:             o.providerID,
+		ModelID:                modelID,
+		BaseURL:                o.baseURL,
+		BaseURLRequired:        true,
+		TokenSource:            o.tokenSource,
+		TokenRequired:          false,
+		Headers:                o.headers,
+		HTTPClient:             o.httpClient,
+		Capabilities:           chatCaps,
+		IncludeStreamOptions:   true,
+		WarnPromptCaching:      true,
+		UseMaxCompletionTokens: o.useMaxCompletionTokens,
 	})
 }
 

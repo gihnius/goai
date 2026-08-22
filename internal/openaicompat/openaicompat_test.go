@@ -1448,11 +1448,11 @@ func TestBuildRequest_MaxCompletionTokens_NoReasoningEffort(t *testing.T) {
 	}
 }
 
-// TestBuildRequest_UsesCompletionTokensOverridesModelID: the model id does not
+// TestBuildRequest_UseMaxCompletionTokensOverridesModelID: the model id does not
 // always identify the model. On Azure OpenAI the wire id is the deployment name
 // the user picked, so the id heuristic misfires in both directions and the
 // caller must be able to state the answer.
-func TestBuildRequest_UsesCompletionTokensOverridesModelID(t *testing.T) {
+func TestBuildRequest_UseMaxCompletionTokensOverridesModelID(t *testing.T) {
 	yes, no := true, false
 	cases := []struct {
 		name    string
@@ -1471,7 +1471,7 @@ func TestBuildRequest_UsesCompletionTokensOverridesModelID(t *testing.T) {
 				Messages:        []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
 				MaxOutputTokens: 1500,
 			}
-			body := BuildRequest(params, tc.modelID, false, RequestConfig{UsesCompletionTokens: tc.flag})
+			body := BuildRequest(params, tc.modelID, false, RequestConfig{UseMaxCompletionTokens: tc.flag})
 
 			if body[tc.want] != 1500 {
 				t.Errorf("%s = %v, want 1500", tc.want, body[tc.want])

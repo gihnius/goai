@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -3312,77 +3313,84 @@ func TestChat_PromptCachingIgnored(t *testing.T) {
 		t.Errorf("DoStream texts = %v, want [ok]", texts)
 	}
 }
-func TestBuildRequest_ToolConfigFromProviderOptions(t *testing.T) {
-	// Gemini 3.x requires toolConfig.include_server_side_tool_invocations when
-	// using built-in tools. Test that toolConfig passed as a flat key in
-	// ProviderOptions is merged with the toolConfig being built.
-	m := &chatModel{id: "gemini-3.5-flash", opts: options{baseURL: defaultBaseURL}}
-	body, err := m.buildRequest(provider.GenerateParams{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "search for Go tutorials"}}}},
-		ProviderOptions: map[string]any{
-			"toolConfig": map[string]any{
-				"include_server_side_tool_invocations": true,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	if body.ToolConfig == nil {
-		t.Fatal("ToolConfig should be set")
+func TestBuildRequest_ToolConfigRequiresGoogleNamespace(t *testing.T) {
+	m := &chatModel{id: "gemini-3.5-flash", opts: options{baseURL: defaultBaseURL}}
+	tests := []struct {
+		name string
+		opts map[string]any
+		want bool
+	}{
+		{
+			name: "flat option is ignored",
+			opts: map[string]any{
+				"toolConfig": map[string]any{"includeServerSideToolInvocations": true},
+			},
+			want: false,
+		},
+		{
+			name: "unsupported spelling is ignored",
+			opts: map[string]any{
+				"google": map[string]any{
+					"toolConfig": map[string]any{"include_server_side_tool_invocations": true},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "non-boolean value is ignored",
+			opts: map[string]any{
+				"google": map[string]any{
+					"toolConfig": map[string]any{"includeServerSideToolInvocations": map[string]any{"enabled": true}},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "google option is accepted",
+			opts: map[string]any{
+				"google": map[string]any{
+					"toolConfig": map[string]any{"includeServerSideToolInvocations": true},
+				},
+			},
+			want: true,
+		},
 	}
-	tc, ok := body.ToolConfig.(map[string]any)
-	if !ok {
-		t.Fatalf("ToolConfig should be map[string]any, got %T", body.ToolConfig)
-	}
-	if val, ok := tc["include_server_side_tool_invocations"].(bool); !ok || !val {
-		t.Errorf("include_server_side_tool_invocations = %v, want true", tc["include_server_side_tool_invocations"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := m.buildRequest(provider.GenerateParams{
+				Messages:        []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "search"}}}},
+				ProviderOptions: tt.opts,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want {
+				tc := body.ToolConfig.(map[string]any)
+				if got := tc["includeServerSideToolInvocations"]; got != true {
+					t.Errorf("includeServerSideToolInvocations = %v, want true", got)
+				}
+			} else if body.ToolConfig != nil {
+				t.Errorf("ToolConfig = %v, want nil", body.ToolConfig)
+			}
+		})
 	}
 }
 
-func TestBuildRequest_ToolConfigMergeWithFunctionCallingConfig(t *testing.T) {
-	// Test that toolConfig from ProviderOptions is merged with functionCallingConfig.
+func TestBuildRequest_RawToolConfigCannotOverrideSDKFields(t *testing.T) {
 	m := &chatModel{id: "gemini-3.5-flash", opts: options{baseURL: defaultBaseURL}}
+	wantRetrieval := map[string]any{"latLng": map[string]any{"latitude": 1.0, "longitude": 2.0}}
 	body, err := m.buildRequest(provider.GenerateParams{
-		Messages:   []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+		Messages:   []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "search"}}}},
 		ToolChoice: "auto",
 		ProviderOptions: map[string]any{
-			"toolConfig": map[string]any{
-				"include_server_side_tool_invocations": true,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if body.ToolConfig == nil {
-		t.Fatal("ToolConfig should be set")
-	}
-	tc, ok := body.ToolConfig.(map[string]any)
-	if !ok {
-		t.Fatalf("ToolConfig should be map[string]any, got %T", body.ToolConfig)
-	}
-
-	// Check that both functionCallingConfig and include_server_side_tool_invocations are present.
-	if _, ok := tc["functionCallingConfig"]; !ok {
-		t.Error("functionCallingConfig should be set")
-	}
-	if val, ok := tc["include_server_side_tool_invocations"].(bool); !ok || !val {
-		t.Errorf("include_server_side_tool_invocations = %v, want true", tc["include_server_side_tool_invocations"])
-	}
-}
-
-func TestBuildRequest_ToolConfigFromGoogleProviderOptions(t *testing.T) {
-	// Test toolConfig nested under ProviderOptions["google"].
-	m := &chatModel{id: "gemini-3.5-flash", opts: options{baseURL: defaultBaseURL}}
-	body, err := m.buildRequest(provider.GenerateParams{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "search"}}}},
-		ProviderOptions: map[string]any{
 			"google": map[string]any{
+				"retrievalConfig": wantRetrieval,
 				"toolConfig": map[string]any{
-					"include_server_side_tool_invocations": true,
+					"includeServerSideToolInvocations": true,
+					"functionCallingConfig":            map[string]any{"mode": "NONE"},
+					"retrievalConfig":                  map[string]any{"invalid": true},
+					"unsupported":                      true,
 				},
 			},
 		},
@@ -3390,15 +3398,49 @@ func TestBuildRequest_ToolConfigFromGoogleProviderOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tc := body.ToolConfig.(map[string]any)
+	if got := tc["functionCallingConfig"].(map[string]any)["mode"]; got != "AUTO" {
+		t.Errorf("functionCallingConfig.mode = %v, want AUTO", got)
+	}
+	if got := tc["retrievalConfig"]; !reflect.DeepEqual(got, wantRetrieval) {
+		t.Errorf("retrievalConfig = %#v, want %#v", got, wantRetrieval)
+	}
+	if got := tc["includeServerSideToolInvocations"]; got != true {
+		t.Errorf("includeServerSideToolInvocations = %v, want true", got)
+	}
+	if _, ok := tc["unsupported"]; ok {
+		t.Error("unsupported raw toolConfig field must not be forwarded")
+	}
+}
 
-	if body.ToolConfig == nil {
-		t.Fatal("ToolConfig should be set")
+func TestChat_Generate_SerializesIncludeServerSideToolInvocations(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-3.5-flash", WithAPIKey("test-key"), WithBaseURL(server.URL))
+	_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "search"}}}},
+		ProviderOptions: map[string]any{
+			"google": map[string]any{
+				"toolConfig": map[string]any{"includeServerSideToolInvocations": true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	tc, ok := body.ToolConfig.(map[string]any)
-	if !ok {
-		t.Fatalf("ToolConfig should be map[string]any, got %T", body.ToolConfig)
+	tc := request["toolConfig"].(map[string]any)
+	if got := tc["includeServerSideToolInvocations"]; got != true {
+		t.Errorf("includeServerSideToolInvocations = %v, want true", got)
 	}
-	if val, ok := tc["include_server_side_tool_invocations"].(bool); !ok || !val {
-		t.Errorf("include_server_side_tool_invocations = %v, want true", tc["include_server_side_tool_invocations"])
+	if _, ok := tc["include_server_side_tool_invocations"]; ok {
+		t.Error("snake_case include_server_side_tool_invocations must not be serialized")
 	}
 }

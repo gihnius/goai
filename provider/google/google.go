@@ -305,17 +305,13 @@ func (m *chatModel) buildRequest(params provider.GenerateParams) (geminiRequestB
 			toolConfig["retrievalConfig"] = rc
 		}
 	}
-	// toolConfig from ProviderOptions, merged last: Gemini 3.x needs
-	// include_server_side_tool_invocations there, alongside the fields above.
-	if tc, ok := params.ProviderOptions["toolConfig"].(map[string]any); ok {
-		for k, v := range tc {
-			toolConfig[k] = v
-		}
-	}
+	// Gemini 3.x supports this additional toolConfig field. Accept only the
+	// documented boolean from the Google namespace; SDK-derived fields above
+	// must not be overridden by raw provider options.
 	if gopts != nil {
 		if tc, ok := gopts["toolConfig"].(map[string]any); ok {
-			for k, v := range tc {
-				toolConfig[k] = v
+			if include, ok := tc["includeServerSideToolInvocations"].(bool); ok {
+				toolConfig["includeServerSideToolInvocations"] = include
 			}
 		}
 	}
