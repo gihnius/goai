@@ -18,11 +18,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/zendev-sh/goai"
 	"github.com/zendev-sh/goai/internal/gemini"
+	"github.com/zendev-sh/goai/internal/geminichat"
 	"github.com/zendev-sh/goai/internal/httpc"
 	"github.com/zendev-sh/goai/internal/sse"
 	"github.com/zendev-sh/goai/provider"
@@ -33,24 +35,41 @@ var (
 	_ provider.LanguageModel          = (*chatModel)(nil)
 	_ provider.CapableModel           = (*chatModel)(nil)
 	_ provider.FileUploadCapableModel = (*chatModel)(nil)
+	_ provider.LanguageModel          = (*vertexChatModel)(nil)
+	_ provider.CapableModel           = (*vertexChatModel)(nil)
 )
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com"
+
+func init() {
+	geminichat.RegisterFactory(newVertexChat)
+}
 
 // Option configures the Google provider.
 type Option func(*options)
 
 type options struct {
 	tokenSource provider.TokenSource
+	usesAPIKey  bool
 	baseURL     string
 	headers     map[string]string
 	httpClient  *http.Client
+
+	// Vertex AI mode: when isVertex is set, requests route to the
+	// {location}-aiplatform.googleapis.com endpoints and authenticate with a
+	// Bearer OAuth token instead of the x-goog-api-key header. The native wire
+	// format (serialization, SSE, thinking, grounding) is identical.
+	isVertex      bool
+	project       string
+	location      string
+	vertexBaseURL string
 }
 
 // WithAPIKey sets a static API key for authentication.
 func WithAPIKey(key string) Option {
 	return func(o *options) {
 		o.tokenSource = provider.StaticToken(key)
+		o.usesAPIKey = true
 	}
 }
 
@@ -58,7 +77,39 @@ func WithAPIKey(key string) Option {
 func WithTokenSource(ts provider.TokenSource) Option {
 	return func(o *options) {
 		o.tokenSource = ts
+		o.usesAPIKey = false
 	}
+}
+
+func withVertex(project, location string) Option {
+	return func(o *options) {
+		o.isVertex = true
+		o.project = project
+		o.location = location
+	}
+}
+
+func withVertexBaseURL(url string) Option {
+	return func(o *options) {
+		o.vertexBaseURL = url
+	}
+}
+
+func newVertexChat(modelID string, cfg geminichat.Config) provider.LanguageModel {
+	model := &chatModel{
+		id: modelID,
+		opts: options{
+			tokenSource:   cfg.TokenSource,
+			baseURL:       defaultBaseURL,
+			headers:       cfg.Headers,
+			httpClient:    cfg.HTTPClient,
+			isVertex:      true,
+			project:       cfg.Project,
+			location:      cfg.Location,
+			vertexBaseURL: cfg.BaseURL,
+		},
+	}
+	return &vertexChatModel{model: model}
 }
 
 // WithBaseURL overrides the default Gemini API base URL.
@@ -91,21 +142,25 @@ func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	// Resolve API key from env if not set.
 	// Support both GOOGLE_GENERATIVE_AI_API_KEY (Vercel AI SDK convention)
 	// and GEMINI_API_KEY (Google's own convention / models.dev).
-	if o.tokenSource == nil {
+	if !o.isVertex && o.tokenSource == nil {
 		if key := cmp.Or(os.Getenv("GOOGLE_GENERATIVE_AI_API_KEY"), os.Getenv("GEMINI_API_KEY")); key != "" {
 			o.tokenSource = provider.StaticToken(key)
 		}
 	}
 	// Resolve base URL from env if not overridden.
-	if o.baseURL == defaultBaseURL {
+	if !o.isVertex && o.baseURL == defaultBaseURL {
 		if base := os.Getenv("GOOGLE_GENERATIVE_AI_BASE_URL"); base != "" {
 			o.baseURL = base
 		}
 	}
-	return &chatModel{
+	model := &chatModel{
 		id:   modelID,
 		opts: o,
 	}
+	if o.isVertex {
+		return &vertexChatModel{model: model}
+	}
+	return model
 }
 
 type chatModel struct {
@@ -135,6 +190,29 @@ func (m *chatModel) FileUploader() provider.FileUploader {
 	return &fileUploader{opts: m.opts}
 }
 
+// vertexChatModel deliberately does not implement FileUploadCapableModel.
+// Vertex native Gemini endpoints do not support the Gemini Developer API's
+// Files API used by chatModel.FileUploader.
+type vertexChatModel struct {
+	model *chatModel
+}
+
+func (m *vertexChatModel) ModelID() string { return m.model.ModelID() }
+
+func (m *vertexChatModel) Capabilities() provider.ModelCapabilities {
+	caps := m.model.Capabilities()
+	caps.FileUpload = false
+	return caps
+}
+
+func (m *vertexChatModel) DoGenerate(ctx context.Context, params provider.GenerateParams) (*provider.GenerateResult, error) {
+	return m.model.DoGenerate(ctx, params)
+}
+
+func (m *vertexChatModel) DoStream(ctx context.Context, params provider.GenerateParams) (*provider.StreamResult, error) {
+	return m.model.DoStream(ctx, params)
+}
+
 func (m *chatModel) DoGenerate(ctx context.Context, params provider.GenerateParams) (*provider.GenerateResult, error) {
 	if params.PromptCaching {
 		fmt.Fprintf(os.Stderr, "goai: google: WithPromptCaching is not supported and will be ignored\n")
@@ -143,7 +221,10 @@ func (m *chatModel) DoGenerate(ctx context.Context, params provider.GeneratePara
 	if err != nil {
 		return nil, err
 	}
-	reqURL := fmt.Sprintf("%s/v1beta/models/%s:generateContent", m.opts.baseURL, url.PathEscape(m.id))
+	reqURL, err := m.endpointURL("generateContent", "")
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := m.doHTTP(ctx, reqURL, body, params.Headers)
 	if err != nil {
@@ -167,7 +248,10 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 	if err != nil {
 		return nil, err
 	}
-	reqURL := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", m.opts.baseURL, url.PathEscape(m.id))
+	reqURL, err := m.endpointURL("streamGenerateContent", "?alt=sse")
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := m.doHTTP(ctx, reqURL, body, params.Headers)
 	if err != nil {
@@ -922,7 +1006,11 @@ func (m *chatModel) doHTTP(ctx context.Context, url string, body any, perRequest
 	jsonBody := httpc.MustMarshalJSON(body)
 	req := httpc.MustNewRequest(ctx, "POST", url, jsonBody)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", token)
+	if m.opts.isVertex {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("x-goog-api-key", token)
+	}
 
 	for k, v := range m.opts.headers {
 		req.Header.Set(k, v)
@@ -952,11 +1040,55 @@ func (m *chatModel) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
+// endpointURL builds the request URL for an action (generateContent /
+// streamGenerateContent). In Vertex mode it targets the aiplatform publisher
+// endpoint; otherwise the generativelanguage base URL.
+func (m *chatModel) endpointURL(action, query string) (string, error) {
+	if !m.opts.isVertex {
+		return fmt.Sprintf("%s/v1beta/models/%s:%s%s", m.opts.baseURL, url.PathEscape(m.id), action, query), nil
+	}
+	if !validGCPIdentifier(m.opts.project) {
+		return "", fmt.Errorf("google: invalid vertex project %q", m.opts.project)
+	}
+	if !validGCPIdentifier(m.opts.location) {
+		return "", fmt.Errorf("google: invalid vertex location %q", m.opts.location)
+	}
+	if base := strings.TrimRight(m.opts.vertexBaseURL, "/"); base != "" {
+		return fmt.Sprintf("%s/%s:%s%s", base, url.PathEscape(m.id), action, query), nil
+	}
+	// The "global" region has no location prefix on the hostname.
+	host := m.opts.location + "-aiplatform.googleapis.com"
+	if m.opts.location == "global" {
+		host = "aiplatform.googleapis.com"
+	}
+	return fmt.Sprintf("https://%s/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:%s%s",
+		host, m.opts.project, m.opts.location, url.PathEscape(m.id), action, query), nil
+}
+
+// validGCPIdentifier guards project/location before hostname interpolation
+// (anti-SSRF). Allows standard projects (my-project-123), domain-scoped
+// (example.com:proj) and regions (us-east5); blocks /, \, @, .., whitespace.
+var validGCPIdentifierRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.:_-]{0,127}$`)
+
+func validGCPIdentifier(s string) bool {
+	return validGCPIdentifierRE.MatchString(s) && !strings.Contains(s, "..")
+}
+
 func (m *chatModel) resolveToken(ctx context.Context) (string, error) {
+	if m.opts.isVertex && m.opts.usesAPIKey {
+		return "", errors.New("google: WithVertex requires an OAuth token source; API keys are not supported")
+	}
 	if m.opts.tokenSource == nil {
 		return "", errors.New("goai: no API key or token source configured")
 	}
 	return m.opts.tokenSource.Token(ctx)
+}
+
+func validateNonChatOptions(o options) error {
+	if o.isVertex {
+		return errors.New("google: WithVertex is only supported by Chat; use provider/vertex for other model types")
+	}
+	return nil
 }
 
 // --- Schema sanitization ---

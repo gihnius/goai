@@ -45,6 +45,9 @@ type imageModel struct {
 func (m *imageModel) ModelID() string { return m.id }
 
 func (m *imageModel) DoGenerate(ctx context.Context, params provider.ImageParams) (*provider.ImageResult, error) {
+	if err := validateNonChatOptions(m.opts, "Image"); err != nil {
+		return nil, err
+	}
 	// Build parameters from standard params.
 	parameters := map[string]any{
 		"sampleCount": params.N,

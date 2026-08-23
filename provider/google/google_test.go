@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/zendev-sh/goai"
+	"github.com/zendev-sh/goai/internal/geminichat"
 	"github.com/zendev-sh/goai/internal/httpc"
 	"github.com/zendev-sh/goai/provider"
 )
@@ -3311,6 +3312,331 @@ func TestChat_PromptCachingIgnored(t *testing.T) {
 	}
 	if len(texts) != 1 || texts[0] != "ok" {
 		t.Errorf("DoStream texts = %v, want [ok]", texts)
+	}
+}
+
+// --- Vertex mode ---
+
+func TestNewVertexChat(t *testing.T) {
+	model := newVertexChat("gemini-2.5-pro", geminichat.Config{
+		Project:     "my-proj",
+		Location:    "global",
+		BaseURL:     "https://vertex.example.test/models",
+		TokenSource: provider.StaticToken("oauth-token"),
+		Headers:     map[string]string{"X-Custom": "value"},
+		HTTPClient:  &http.Client{},
+	})
+	vertexModel, ok := model.(*vertexChatModel)
+	if !ok {
+		t.Fatalf("newVertexChat() type = %T, want *vertexChatModel", model)
+	}
+	if vertexModel.model.opts.project != "my-proj" || vertexModel.model.opts.location != "global" {
+		t.Errorf("Vertex config = %#v, want project/location preserved", vertexModel.model.opts)
+	}
+	if vertexModel.model.opts.vertexBaseURL != "https://vertex.example.test/models" {
+		t.Errorf("vertexBaseURL = %q", vertexModel.model.opts.vertexBaseURL)
+	}
+}
+
+// TestVertexEndpointURL checks the aiplatform URL construction, the "global"
+// region special case, and the anti-SSRF guard.
+func TestVertexEndpointURL(t *testing.T) {
+	m := &chatModel{id: "gemini-2.5-pro", opts: options{isVertex: true, project: "my-proj", location: "us-central1"}}
+	got, err := m.endpointURL("generateContent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+	if got != want {
+		t.Errorf("vertex url:\n got %s\nwant %s", got, want)
+	}
+
+	// global region drops the host prefix.
+	mg := &chatModel{id: "gemini-2.5-pro", opts: options{isVertex: true, project: "p", location: "global"}}
+	got, _ = mg.endpointURL("streamGenerateContent", "?alt=sse")
+	want = "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+	if got != want {
+		t.Errorf("global url:\n got %s\nwant %s", got, want)
+	}
+
+	// SSRF: a project with a slash must be rejected.
+	bad := &chatModel{id: "x", opts: options{isVertex: true, project: "evil.com/../../foo", location: "us-central1"}}
+	if _, err := bad.endpointURL("generateContent", ""); err == nil {
+		t.Error("expected error for invalid project identifier")
+	}
+
+	// SSRF: a location with a slash must be rejected.
+	badLoc := &chatModel{id: "x", opts: options{isVertex: true, project: "my-proj", location: "evil.com/loc"}}
+	if _, err := badLoc.endpointURL("generateContent", ""); err == nil {
+		t.Error("expected error for invalid location identifier")
+	}
+}
+
+// TestChat_Vertex_Generate_BearerAuth verifies that Vertex mode authenticates
+// DoGenerate with Bearer token and parses the response.
+func TestChat_Vertex_Generate_BearerAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+			t.Errorf("Authorization = %q, want Bearer oauth-token", got)
+		}
+		if r.Header.Get("x-goog-api-key") != "" {
+			t.Error("vertex must not send x-goog-api-key")
+		}
+		if !strings.Contains(r.URL.Path, "gemini-2.5-pro") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"hola"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		withVertex("my-proj", "us-central1"),
+		withVertexBaseURL(server.URL))
+
+	res, err := model.DoGenerate(context.Background(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "hola" {
+		t.Errorf("text = %q, want hola", res.Text)
+	}
+}
+
+func TestChat_Vertex_IgnoresGeminiEnvironment(t *testing.T) {
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "gemini-api-key")
+	t.Setenv("GEMINI_API_KEY", "gemini-fallback-key")
+	t.Setenv("GOOGLE_GENERATIVE_AI_BASE_URL", "https://gemini.example.test")
+
+	model := Chat("gemini-2.5-pro", withVertex("my-proj", "us-central1"))
+	vertexModel, ok := model.(*vertexChatModel)
+	if !ok {
+		t.Fatalf("Chat() type = %T, want *vertexChatModel", model)
+	}
+	if vertexModel.model.opts.tokenSource != nil {
+		t.Error("Vertex mode must not use a Gemini API key from the environment")
+	}
+	if vertexModel.model.opts.baseURL != defaultBaseURL {
+		t.Errorf("Vertex baseURL = %q, want default %q", vertexModel.model.opts.baseURL, defaultBaseURL)
+	}
+}
+
+func TestChat_Vertex_RejectsAPIKey(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		withVertex("my-proj", "us-central1"),
+		WithAPIKey("gemini-api-key"))
+
+	_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "OAuth token source") {
+		t.Fatalf("DoGenerate() error = %v, want OAuth token source error", err)
+	}
+}
+
+func TestChat_Vertex_AuthOptionPrecedence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+			t.Errorf("Authorization = %q, want Bearer oauth-token", got)
+		}
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	t.Run("token source after API key wins", func(t *testing.T) {
+		model := Chat("gemini-2.5-pro",
+			withVertex("my-proj", "us-central1"),
+			WithAPIKey("gemini-api-key"),
+			WithTokenSource(provider.StaticToken("oauth-token")),
+			withVertexBaseURL(server.URL))
+		if _, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("API key after token source is rejected", func(t *testing.T) {
+		model := Chat("gemini-2.5-pro",
+			withVertex("my-proj", "us-central1"),
+			WithTokenSource(provider.StaticToken("oauth-token")),
+			WithAPIKey("gemini-api-key"),
+			withVertexBaseURL(server.URL))
+		_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "OAuth token source") {
+			t.Fatalf("DoGenerate() error = %v, want OAuth token source error", err)
+		}
+	})
+}
+
+func TestChat_Vertex_MissingTokenFailsGenerateAndStream(t *testing.T) {
+	model := Chat("gemini-2.5-pro", withVertex("my-proj", "us-central1"))
+	params := provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	}
+	if _, err := model.DoGenerate(t.Context(), params); err == nil || !strings.Contains(err.Error(), "no API key or token source") {
+		t.Errorf("DoGenerate() error = %v, want missing token error", err)
+	}
+	if _, err := model.DoStream(t.Context(), params); err == nil || !strings.Contains(err.Error(), "no API key or token source") {
+		t.Errorf("DoStream() error = %v, want missing token error", err)
+	}
+}
+
+func TestVertexOptionsRejectedByNonChatModels(t *testing.T) {
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	opts := []Option{
+		withVertex("my-proj", "us-central1"),
+		WithTokenSource(provider.StaticToken("oauth-token")),
+	}
+	want := "WithVertex is only supported by Chat"
+
+	for _, modelID := range []string{"imagen-4.0-generate-001", "gemini-2.5-flash-image"} {
+		t.Run("image "+modelID, func(t *testing.T) {
+			_, err := Image(modelID, opts...).DoGenerate(t.Context(), provider.ImageParams{Prompt: "draw", N: 1})
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("DoGenerate() error = %v, want %q", err, want)
+			}
+		})
+	}
+
+	t.Run("embedding", func(t *testing.T) {
+		_, err := Embedding("text-embedding-004", opts...).DoEmbed(t.Context(), []string{"hello"}, provider.EmbedParams{})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("DoEmbed() error = %v, want %q", err, want)
+		}
+	})
+
+	t.Run("video", func(t *testing.T) {
+		_, err := Video("veo-3.0-generate-preview", opts...).DoGenerate(t.Context(), provider.VideoParams{Prompt: "wave", N: 1})
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("DoGenerate() error = %v, want %q", err, want)
+		}
+	})
+}
+
+func TestChat_Vertex_DoesNotAdvertiseFileUpload(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		withVertex("my-proj", "us-central1"))
+
+	if _, ok := model.(provider.FileUploadCapableModel); ok {
+		t.Fatalf("Vertex model type %T must not implement FileUploadCapableModel", model)
+	}
+	if caps := provider.ModelCapabilitiesOf(model); caps.FileUpload {
+		t.Error("Vertex model must not advertise file upload")
+	}
+	if got := model.ModelID(); got != "gemini-2.5-pro" {
+		t.Errorf("ModelID() = %q, want gemini-2.5-pro", got)
+	}
+}
+
+func TestChat_Vertex_WithBaseURLDoesNotOverrideVertexEndpoint(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		withVertex("my-proj", "us-central1"),
+		WithBaseURL("https://gemini.example.test"))
+	vertexModel := model.(*vertexChatModel)
+
+	got, err := vertexModel.model.endpointURL("generateContent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/my-proj/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+	if got != want {
+		t.Errorf("endpointURL() = %q, want %q", got, want)
+	}
+}
+
+func TestChat_VertexBaseURLIsNormalizedAndIgnoredOutsideVertex(t *testing.T) {
+	vertex := Chat("gemini-2.5-pro",
+		withVertex("my-proj", "us-central1"),
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		withVertexBaseURL("https://vertex.example.test/models/"))
+	got, err := vertex.(*vertexChatModel).model.endpointURL("generateContent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://vertex.example.test/models/gemini-2.5-pro:generateContent"; got != want {
+		t.Errorf("endpointURL() = %q, want %q", got, want)
+	}
+
+	gemini := Chat("gemini-2.5-flash",
+		WithAPIKey("api-key"),
+		WithBaseURL("https://gemini.example.test"),
+		withVertexBaseURL("https://vertex.example.test/models"))
+	got, err = gemini.(*chatModel).endpointURL("generateContent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://gemini.example.test/v1beta/models/gemini-2.5-flash:generateContent"; got != want {
+		t.Errorf("endpointURL() = %q, want %q", got, want)
+	}
+}
+
+// TestChat_Vertex_InvalidEndpointErrors verifies that DoGenerate and DoStream
+// return errors when endpointURL fails due to invalid identifiers.
+func TestChat_Vertex_InvalidEndpointErrors(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("token")),
+		withVertex("invalid/project", "us-central1"))
+
+	params := provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	}
+
+	if _, err := model.DoGenerate(context.Background(), params); err == nil {
+		t.Error("DoGenerate should fail for invalid vertex project")
+	}
+
+	if _, err := model.DoStream(context.Background(), params); err == nil {
+		t.Error("DoStream should fail for invalid vertex project")
+	}
+}
+
+// TestChat_Vertex_BearerAuth verifies that Vertex mode authenticates with a
+// Bearer token (not x-goog-api-key) and still parses the native SSE stream.
+func TestChat_Vertex_BearerAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+			t.Errorf("Authorization = %q, want Bearer oauth-token", got)
+		}
+		if r.Header.Get("x-goog-api-key") != "" {
+			t.Error("vertex must not send x-goog-api-key")
+		}
+		if !strings.Contains(r.URL.Path, "gemini-2.5-pro") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hola\"}]},\"finishReason\":\"STOP\"}]}\n\n")
+	}))
+	defer server.Close()
+
+	// Vertex endpoint overrides are separate from Gemini API base URL overrides.
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		withVertex("my-proj", "us-central1"),
+		withVertexBaseURL(server.URL))
+
+	res, err := model.DoStream(context.Background(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	for chunk := range res.Stream {
+		if chunk.Type == provider.ChunkText {
+			text += chunk.Text
+		}
+	}
+	if text != "hola" {
+		t.Errorf("text = %q, want hola", text)
 	}
 }
 
