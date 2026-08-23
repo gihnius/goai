@@ -46,14 +46,14 @@ var (
 type Option func(*options)
 
 type options struct {
-	tokenSource   provider.TokenSource
-	project       string
-	location      string
-	baseURL       string
-	nativeBaseURL string
-	headers       map[string]string
-	httpClient    *http.Client
-	nativeGemini  bool
+	tokenSource       provider.TokenSource
+	project           string
+	location          string
+	baseURL           string
+	nativeChatBaseURL string
+	headers           map[string]string
+	httpClient        *http.Client
+	nativeGemini      bool
 }
 
 // WithAPIKey sets a static API key for authentication.
@@ -86,18 +86,19 @@ func WithLocation(location string) Option {
 	}
 }
 
-// WithBaseURL overrides the OpenAI-compatible endpoint origin.
+// WithBaseURL overrides the endpoint used by the selected model constructor.
+// Native Gemini Chat uses WithNativeChatBaseURL instead.
 func WithBaseURL(url string) Option {
 	return func(o *options) {
 		o.baseURL = url
 	}
 }
 
-// WithNativeBaseURL overrides the native Vertex models collection URL. The
+// WithNativeChatBaseURL overrides the native Vertex models collection URL. The
 // model ID and generateContent action are appended to this URL.
-func WithNativeBaseURL(url string) Option {
+func WithNativeChatBaseURL(url string) Option {
 	return func(o *options) {
-		o.nativeBaseURL = url
+		o.nativeChatBaseURL = url
 	}
 }
 
@@ -142,7 +143,7 @@ func resolveOpts(opts []Option) options {
 	// Keep endpoint overrides transport-specific so their URL contracts do not
 	// change when WithNativeGemini is enabled.
 	if o.nativeGemini {
-		o.nativeBaseURL = cmp.Or(o.nativeBaseURL, os.Getenv("GOOGLE_VERTEX_NATIVE_BASE_URL"))
+		o.nativeChatBaseURL = cmp.Or(o.nativeChatBaseURL, os.Getenv("GOOGLE_VERTEX_NATIVE_CHAT_BASE_URL"))
 	} else {
 		o.baseURL = cmp.Or(o.baseURL, os.Getenv("GOOGLE_VERTEX_BASE_URL"))
 	}
@@ -268,10 +269,10 @@ func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	if o.nativeGemini {
 		return nativeGeminiChat(modelID, o)
 	}
-	if o.nativeBaseURL != "" {
+	if o.nativeChatBaseURL != "" {
 		return &invalidChatModel{
 			id:  modelID,
-			err: errors.New("vertex: WithNativeBaseURL requires WithNativeGemini"),
+			err: errors.New("vertex: WithNativeChatBaseURL requires WithNativeGemini"),
 		}
 	}
 	return &chatModel{id: modelID, opts: o}
@@ -287,17 +288,24 @@ func nativeGeminiChat(modelID string, o options) provider.LanguageModel {
 	if o.baseURL != "" {
 		return &invalidChatModel{
 			id:  modelID,
-			err: errors.New("vertex: WithBaseURL configures the OpenAI-compatible transport; use WithNativeBaseURL with WithNativeGemini"),
+			err: errors.New("vertex: WithBaseURL configures the OpenAI-compatible transport; use WithNativeChatBaseURL with WithNativeGemini"),
 		}
 	}
 	return geminichat.New(modelID, geminichat.Config{
 		Project:     o.project,
 		Location:    o.location,
-		BaseURL:     o.nativeBaseURL,
+		BaseURL:     o.nativeChatBaseURL,
 		TokenSource: o.tokenSource,
 		Headers:     o.headers,
 		HTTPClient:  o.httpClient,
 	})
+}
+
+func validateNonChatOptions(o options, constructor string) error {
+	if o.nativeGemini || o.nativeChatBaseURL != "" {
+		return fmt.Errorf("vertex: WithNativeGemini and WithNativeChatBaseURL are only supported by Chat, not %s", constructor)
+	}
+	return nil
 }
 
 type invalidChatModel struct {
