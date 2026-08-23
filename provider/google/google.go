@@ -80,6 +80,9 @@ func WithTokenSource(ts provider.TokenSource) Option {
 // REST over the aiplatform endpoints, Bearer OAuth auth) instead of the
 // generativelanguage.googleapis.com API. The token source must yield a GCP
 // OAuth access token (see provider.CachedTokenSource over a service account).
+//
+// Applications should normally use vertex.Chat with vertex.WithNativeGemini so
+// Vertex auth, project, location, and environment resolution stay centralized.
 func WithVertex(project, location string) Option {
 	return func(o *options) {
 		o.isVertex = true
@@ -90,6 +93,9 @@ func WithVertex(project, location string) Option {
 
 // WithVertexBaseURL overrides the Vertex models collection URL. The model ID
 // and action are appended to this URL. It has no effect outside Vertex mode.
+//
+// Applications should normally configure this through vertex.WithBaseURL and
+// vertex.WithNativeGemini.
 func WithVertexBaseURL(url string) Option {
 	return func(o *options) {
 		o.vertexBaseURL = url

@@ -71,6 +71,74 @@ func TestChat_Generate(t *testing.T) {
 	}
 }
 
+func TestChat_NativeGeminiVertex(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+			t.Errorf("Authorization = %q, want Bearer oauth-token", got)
+		}
+		if got := r.Header.Get("X-Custom"); got != "value" {
+			t.Errorf("X-Custom = %q, want value", got)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/gemini-2.5-pro:generateContent") {
+			t.Errorf("path = %q, want native generateContent endpoint", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"native"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-2.5-pro",
+		WithNativeGemini(),
+		WithProject("my-proj"),
+		WithLocation("global"),
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		WithBaseURL(server.URL+"/models"),
+		WithHeaders(map[string]string{"X-Custom": "value"}),
+		WithHTTPClient(server.Client()))
+
+	result, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "native" {
+		t.Errorf("Text = %q, want native", result.Text)
+	}
+	if _, ok := model.(provider.FileUploadCapableModel); ok {
+		t.Fatalf("native Vertex model type %T must not implement FileUploadCapableModel", model)
+	}
+}
+
+func TestChat_NativeGeminiAPIKeyFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-goog-api-key"); got != "api-key" {
+			t.Errorf("x-goog-api-key = %q, want api-key", got)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Error("Gemini API fallback must not send Authorization")
+		}
+		if !strings.HasSuffix(r.URL.Path, "/v1beta/models/gemini-2.5-flash:generateContent") {
+			t.Errorf("path = %q, want Gemini native endpoint", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"fallback"}]},"finishReason":"STOP"}]}`)
+	}))
+	defer server.Close()
+
+	model := Chat("gemini-2.5-flash",
+		WithNativeGemini(),
+		WithAPIKey("api-key"),
+		WithBaseURL(server.URL))
+	result, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "fallback" {
+		t.Errorf("Text = %q, want fallback", result.Text)
+	}
+}
+
 func TestNoProject(t *testing.T) {
 	t.Setenv("GOOGLE_VERTEX_PROJECT", "")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "")

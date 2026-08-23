@@ -30,6 +30,7 @@ import (
 	"github.com/zendev-sh/goai/internal/openaicompat"
 	"github.com/zendev-sh/goai/internal/sse"
 	"github.com/zendev-sh/goai/provider"
+	googleprovider "github.com/zendev-sh/goai/provider/google"
 )
 
 // Compile-time interface compliance checks.
@@ -42,12 +43,13 @@ var (
 type Option func(*options)
 
 type options struct {
-	tokenSource provider.TokenSource
-	project     string
-	location    string
-	baseURL     string
-	headers     map[string]string
-	httpClient  *http.Client
+	tokenSource  provider.TokenSource
+	project      string
+	location     string
+	baseURL      string
+	headers      map[string]string
+	httpClient   *http.Client
+	nativeGemini bool
 }
 
 // WithAPIKey sets a static API key for authentication.
@@ -98,6 +100,14 @@ func WithHeaders(h map[string]string) Option {
 func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) {
 		o.httpClient = c
+	}
+}
+
+// WithNativeGemini uses Vertex AI's native Gemini generateContent transport
+// instead of the OpenAI-compatible endpoint. The default remains unchanged.
+func WithNativeGemini() Option {
+	return func(o *options) {
+		o.nativeGemini = true
 	}
 }
 
@@ -238,7 +248,35 @@ func isNativeAPIKeyAuth(ts provider.TokenSource) bool {
 // Chat creates a Vertex AI language model for the given model ID.
 func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	o := resolveOpts(opts)
+	if o.nativeGemini {
+		return nativeGeminiChat(modelID, o)
+	}
 	return &chatModel{id: modelID, opts: o}
+}
+
+func nativeGeminiChat(modelID string, o options) provider.LanguageModel {
+	googleOpts := make([]googleprovider.Option, 0, 6)
+	if apiKey, ok := o.tokenSource.(*apiKeyTokenSource); ok {
+		googleOpts = append(googleOpts, googleprovider.WithAPIKey(apiKey.key))
+		if o.baseURL != "" {
+			googleOpts = append(googleOpts, googleprovider.WithBaseURL(o.baseURL))
+		}
+	} else {
+		googleOpts = append(googleOpts, googleprovider.WithVertex(o.project, o.location))
+		if o.tokenSource != nil {
+			googleOpts = append(googleOpts, googleprovider.WithTokenSource(o.tokenSource))
+		}
+		if o.baseURL != "" {
+			googleOpts = append(googleOpts, googleprovider.WithVertexBaseURL(o.baseURL))
+		}
+	}
+	if o.headers != nil {
+		googleOpts = append(googleOpts, googleprovider.WithHeaders(o.headers))
+	}
+	if o.httpClient != nil {
+		googleOpts = append(googleOpts, googleprovider.WithHTTPClient(o.httpClient))
+	}
+	return googleprovider.Chat(modelID, googleOpts...)
 }
 
 type chatModel struct {
