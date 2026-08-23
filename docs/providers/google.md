@@ -221,17 +221,19 @@ Google-specific options are nested under the `"google"` key:
 | `google.labels` | `map[string]any` | Request labels for tracking. |
 | `google.imageConfig` | `map[string]any` | Gemini image config: `{aspectRatio, imageSize}`. |
 | `google.retrievalConfig` | `map[string]any` | Retrieval configuration for tool config. |
+| `google.toolConfig.includeServerSideToolInvocations` | `bool` | Include Gemini server-side tool calls/responses; other raw `toolConfig` fields are ignored. |
 | `google.google_search` | `map[string]any` | Legacy Google Search via ProviderOptions (prefer `google.Tools.GoogleSearch()`). |
 
 ## Provider Tools
 
-Three built-in tools are available via `google.Tools`. These require Gemini 2.0+.
+Four built-in tools are available via `google.Tools`.
 
 | Tool | Description | Execution |
 |------|-------------|-----------|
 | `google.Tools.GoogleSearch()` | Grounding with Google Search | Server-side |
 | `google.Tools.URLContext()` | Fetch and process URL content | Server-side |
 | `google.Tools.CodeExecution()` | Execute Python code in sandbox | Server-side |
+| `google.Tools.ComputerUse(opts...)` | Computer use with configurable environment/excluded functions | Server-side |
 
 ### GoogleSearch
 
@@ -293,5 +295,5 @@ No configuration options. The model generates Python code, executes it server-si
 - **Function call IDs**: Gemini does not provide tool call IDs. GoAI generates synthetic IDs in the format `call_{toolName}_{N}` with a counter to ensure uniqueness.
 - **Role mapping**: `assistant` is mapped to `model`, and `tool` is mapped to `user` for function responses.
 - **Embedding batch limit**: 100 values per call via `batchEmbedContents`. `goai.EmbedMany` auto-chunks larger batches.
-- **Difference from Vertex**: This provider uses Google AI (`generativelanguage.googleapis.com`) with API key auth. The Vertex provider uses Vertex AI endpoints with OAuth/ADC auth and supports additional features like enterprise web search and RAG stores.
+- **Difference from Vertex**: This provider uses Google AI (`generativelanguage.googleapis.com`) with API-key auth. `vertex.Chat` uses Vertex's OpenAI-compatible transport by default and can opt into native Gemini `generateContent` with `vertex.WithNativeGemini()` plus OAuth/ADC. Native Vertex chat intentionally does not expose the Gemini Developer API file uploader.
 - **File upload**: Google Gemini supports remote file upload via the Files API. Use `model.FileUploader()` to get a `provider.FileUploader` for uploading and deleting files. Uploaded files are referenced via `Part.RemoteRef` in messages. Compat providers map file parts to native OpenAI shapes (`file` for PDFs, `input_audio` for audio).

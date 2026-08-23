@@ -92,7 +92,7 @@ Embeddings:
 
 ```go
 emb := fptcloud.Embedding("bge-m3")
-result, err := goai.Embed(ctx, emb, []string{"hello", "world"})
+result, err := goai.EmbedMany(ctx, emb, []string{"hello", "world"})
 ```
 
 ## Options

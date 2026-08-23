@@ -28,7 +28,7 @@
 
 Inspired by the [Vercel AI SDK](https://sdk.vercel.ai). The same clean abstractions, idiomatically adapted for Go with generics, interfaces, and functional options.
 
-## What's New
+## Selected Releases
 
 > **v0.9.0** - Provider-neutral file upload and remote file references. `FileUploader` interface + `RemoteFileRef` for OpenAI (Files API), Anthropic (Files API), and Google Gemini (Files API). Compat providers map file parts to native OpenAI shapes. [Changelog →](https://github.com/zendev-sh/goai/releases)
 >
@@ -48,16 +48,16 @@ Inspired by the [Vercel AI SDK](https://sdk.vercel.ai). The same clean abstracti
 - **Structured output**: `GenerateObject[T]` auto-generates JSON Schema from Go types via reflection
 - **Streaming**: Real-time text and partial object streaming via channels
 - **Dynamic auth**: `TokenSource` interface for OAuth, rotating keys, cloud IAM, with `CachedTokenSource` for TTL-based caching
-- **Prompt caching**: Automatic cache control for supported providers (Anthropic, Bedrock)
+- **Prompt caching**: Automatic cache control for supported providers (Anthropic, Bedrock, MiniMax)
 - **Citations/sources**: Grounding and inline citations from xAI, Perplexity, Google, OpenAI
 - **Web search**: Built-in web search tools for OpenAI, Anthropic, Google, Groq, xAI. Model decides when to search
 - **Code execution**: Server-side Python sandboxes via OpenAI, Anthropic, Google, xAI. No local setup
 - **Computer use**: Anthropic computer, bash, text editor tools for autonomous desktop interaction
-- **20 provider-defined tools**: Web fetch, file search, image generation, X search, and more - [full list](#provider-defined-tools)
+- **23 provider-defined tools**: Web fetch, file search, image generation, X search, and more - [full list](#provider-defined-tools)
 - **MCP client**: Connect to any MCP server (stdio, HTTP, SSE), auto-convert tools for use with GoAI
 - **Observability**: Built-in Langfuse and OpenTelemetry (OTel) integrations for tracing generations, tools, and multi-step loops
 - **Multi-agent orchestration**: For declarative YAML workflows on top of GoAI, see [zenflow](https://github.com/zendev-sh/zenflow)
-- **9 lifecycle hooks**: Observability (`OnRequest`, `OnResponse`, `OnToolCallStart`, `OnToolCall`, `OnStepFinish`, `OnFinish`) and interceptor (`OnBeforeToolExecute`, `OnAfterToolExecute`, `OnBeforeStep`) hooks for permission gates, secret scanning, output transformation, and loop control
+- **10 lifecycle hooks**: Observability (`OnRequest`, `OnResponse`, `OnToolCallStart`, `OnToolCall`, `OnStepFinish`, `OnFinish`, `OnPanic`) and interceptor (`OnBeforeToolExecute`, `OnAfterToolExecute`, `OnBeforeStep`) hooks for permission gates, secret scanning, output transformation, and loop control
 - **Retry/backoff**: Automatic retry with exponential backoff on retryable HTTP errors (429/5xx)
 - **Minimal dependencies**: Core depends on `golang.org/x/oauth2` + one indirect (`cloud.google.com/go/compute/metadata`). Optional `observability/otel` submodule uses separate `go.mod` with OTel SDK.
 
@@ -353,7 +353,7 @@ Image-to-video is supported with `WithVideoImage`. First/last frames and image r
 
 ## Observability
 
-Built-in [Langfuse](https://langfuse.com) and [OpenTelemetry](https://opentelemetry.io) integrations. Nine lifecycle hooks cover the full generation pipeline -- observability providers use them to trace LLM calls, tool executions, and multi-step agent loops:
+Built-in [Langfuse](https://langfuse.com) and [OpenTelemetry](https://opentelemetry.io) integrations. Ten lifecycle hooks cover the full generation pipeline -- observability providers use them to trace LLM calls, tool executions, panics, and multi-step agent loops:
 
 ```go
 import "github.com/zendev-sh/goai/observability/langfuse"
@@ -409,7 +409,7 @@ model := vertex.Chat("gemini-2.5-pro",
 model := bedrock.Chat("anthropic.claude-sonnet-4-6-v1:0")
 
 // Local (Ollama, vLLM)
-model := ollama.Chat("llama3", ollama.WithBaseURL("http://localhost:11434/v1"))
+model := ollama.Chat("llama3", ollama.WithBaseURL("http://localhost:11434"))
 
 result, err := goai.GenerateText(ctx, model, goai.WithPrompt("Hello"))
 ```
@@ -674,13 +674,13 @@ Retry behavior: automatic exponential backoff on retryable HTTP errors (429/5xx,
 
 ## Provider-Defined Tools
 
-Providers expose built-in tools that the model can invoke server-side. GoAI supports 20 provider-defined tools across 5 providers:
+Providers expose built-in tools that the model can invoke server-side. GoAI supports 23 provider-defined tools across 5 providers:
 
 | Provider  | Tools                                                                                                                                                                  | Import               |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| Anthropic | `Computer`, `Computer_20251124`, `Bash`, `TextEditor`, `TextEditor_20250728`, `WebSearch`, `WebSearch_20260209`, `WebFetch`, `CodeExecution`, `CodeExecution_20250825` | `provider/anthropic` |
+| Anthropic | `Computer`, `Computer_20251124`, `Bash`, `TextEditor`, `TextEditor_20250728`, `WebSearch`, `WebSearch_20260209`, `WebFetch`, `CodeExecution`, `CodeExecution_20250825`, `ToolSearchToolRegex`, `ToolSearchToolBM25` | `provider/anthropic` |
 | OpenAI    | `WebSearch`, `CodeInterpreter`, `FileSearch`, `ImageGeneration`                                                                                                        | `provider/openai`    |
-| Google    | `GoogleSearch`, `URLContext`, `CodeExecution`                                                                                                                          | `provider/google`    |
+| Google    | `GoogleSearch`, `URLContext`, `CodeExecution`, `ComputerUse`                                                                                                           | `provider/google`    |
 | xAI       | `WebSearch`, `XSearch`                                                                                                                                                 | `provider/xai`       |
 | Groq      | `BrowserSearch`                                                                                                                                                        | `provider/groq`      |
 

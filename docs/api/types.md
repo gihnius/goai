@@ -1,11 +1,11 @@
 ---
 title: Types
-description: "Complete type reference for GoAI and provider packages. Covers TextResult, Message, Part, StreamChunk, Usage, ToolCall, and all public types."
+description: "Reference for commonly used GoAI and provider types, including TextResult, Message, Part, StreamChunk, Usage, and ToolCall."
 ---
 
 # Types
 
-This page documents all public types in the `goai` and `goai/provider` packages.
+This page documents the commonly used public types in the `goai` and `goai/provider` packages. Specialized state and hook types are covered in their dedicated concept/reference pages.
 
 ---
 
@@ -177,7 +177,7 @@ schema := goai.SchemaFrom[Recipe]()
 - `time.Time` is converted to `{"type": "string", "format": "date-time"}`.
 - Self-referential named slice types (e.g. `type Foo []Foo`) are detected and produce a schema with `{"type": "array"}` (no items) to avoid infinite recursion.
 - Mutually recursive named slice types (e.g. `type A []B; type B []A`) are not detected and will cause a stack overflow. Use struct wrappers instead of raw named-slice mutual recursion.
-- Pointer types are unwrapped and marked nullable in the schema.
+- Pointer fields are unwrapped and marked nullable; pointer layers on the top-level schema type are unwrapped without a nullable marker.
 
 See [Structured Output](../getting-started/structured-output.md) for full usage.
 
@@ -192,11 +192,12 @@ type Tool struct {
     InputSchema            json.RawMessage                                           // JSON Schema for input parameters.
     ProviderDefinedType    string                                                    // Provider-defined tool type (e.g. "computer_20250124").
     ProviderDefinedOptions map[string]any                                            // Provider-specific tool configuration.
+    DeferLoading           bool                                                      // Defer provider tool loading until selected.
     Execute                func(ctx context.Context, input json.RawMessage) (string, error) // Tool implementation.
 }
 ```
 
-When `Execute` is non-nil and `MaxSteps > 1`, `GenerateText` automatically invokes the tool and feeds results back to the model.
+When `Execute` is non-nil, `GenerateText` invokes requested tools even with the default single step; `MaxSteps > 1` enables a follow-up model call. `StreamText` requires `MaxSteps > 1` for automatic execution/looping.
 
 When using provider-defined tools (web search, code execution, etc.), set `ProviderDefinedType` and leave `Execute` nil - the provider handles execution server-side.
 
@@ -394,6 +395,7 @@ type FinishInfo struct {
     TotalSteps     int                // Number of generation steps executed.
     TotalUsage     provider.Usage     // Aggregated token usage across all steps.
     FinishReason   provider.FinishReason // Finish reason from the last step.
+    StoppedBy      provider.StopCause // Why generation terminated.
 }
 ```
 
@@ -497,6 +499,7 @@ type GenerateParams struct {
     Headers          map[string]string  // Additional HTTP headers.
     ProviderOptions  map[string]any     // Provider-specific parameters.
     PromptCaching    bool               // Enable prompt caching.
+    CacheTTL         string             // Provider cache lifetime hint.
     ToolChoice       string             // Tool selection: "auto", "none", "required", or tool name.
     ResponseFormat   *ResponseFormat    // Structured JSON output schema.
 }
@@ -509,6 +512,8 @@ Response from a non-streaming generation.
 ```go
 type GenerateResult struct {
     Text             string                       // Generated text.
+    Reasoning        string                       // Generated reasoning text.
+    ReasoningParts   []Part                       // Reasoning blocks with preserved boundaries/metadata.
     ToolCalls        []ToolCall                    // Tool calls requested by the model.
     Sources          []Source                      // Citations from response annotations.
     FinishReason     FinishReason                  // Why generation stopped.
@@ -592,6 +597,7 @@ type Part struct {
     ToolInput       json.RawMessage // For PartToolCall.
     ToolOutput      string          // For PartToolResult.
     CacheControl    string          // Cache directive (e.g. "ephemeral").
+    CacheControlTTL string          // Provider cache lifetime for this part.
     Detail          string          // Image detail level ("low", "high", "auto").
     MediaType       string          // Content type (for PartImage, PartFile).
     Filename        string          // For PartFile.
@@ -639,6 +645,7 @@ type ToolDefinition struct {
     InputSchema            json.RawMessage // JSON Schema for input parameters.
     ProviderDefinedType    string         // Provider-defined tool type.
     ProviderDefinedOptions map[string]any // Provider-specific tool configuration.
+    DeferLoading           bool           // Defer provider tool loading until selected.
 }
 ```
 
@@ -669,6 +676,7 @@ const (
     StopCauseBeforeStep StopCause = "before-step" // Stopped by OnBeforeStep.
     StopCauseAbort      StopCause = "abort"       // Terminated due to error.
     StopCauseEmpty      StopCause = "empty"       // Provider closed stream without chunks.
+    StopCauseNoExecutableTools StopCause = "no-executable-tools" // Model requested tools with no executable handlers.
 )
 ```
 
@@ -977,8 +985,8 @@ Interface for uploading and deleting remote files. Providers that support file u
 
 ```go
 type FileUploader interface {
-    UploadFile(ctx context.Context, upload *FileUpload) (*RemoteFileRef, error)
-    DeleteFile(ctx context.Context, ref *RemoteFileRef) error
+    UploadFile(ctx context.Context, upload FileUpload) (*RemoteFileRef, error)
+    DeleteFile(ctx context.Context, ref RemoteFileRef) error
 }
 ```
 
@@ -997,5 +1005,5 @@ type FileUploadCapableModel interface {
 Sentinel error returned by providers that do not support remote file upload. Callers can check for this error to fall back to inline data URIs.
 
 ```go
-var ErrFileUploadUnsupported = errors.New("provider: file upload not supported by this provider")
+var ErrFileUploadUnsupported = errors.New("goai: file upload not supported by this provider")
 ```

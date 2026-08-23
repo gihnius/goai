@@ -1,6 +1,6 @@
 ---
 title: Anthropic Provider
-description: "Use Anthropic Claude models in Go with GoAI. Supports the Messages API, extended thinking, prompt caching, and 10 provider-defined tools."
+description: "Use Anthropic Claude models in Go with GoAI. Supports the Messages API, extended thinking, prompt caching, and 12 provider-defined tools."
 ---
 
 # Anthropic
@@ -138,7 +138,7 @@ Thinking types: `"enabled"` (with `budgetTokens`), `"adaptive"`, `"disabled"`.
 
 ## Provider Tools
 
-Ten built-in tools are available via `anthropic.Tools`. These use Anthropic's native tool types.
+Twelve built-in tools are available via `anthropic.Tools`. These use Anthropic's native tool types.
 
 | Tool | Version | Description | Execution |
 |------|---------|-------------|-----------|
@@ -152,6 +152,8 @@ Ten built-in tools are available via `anthropic.Tools`. These use Anthropic's na
 | `anthropic.Tools.WebFetch()` | 20260209 | Fetch URL content | Server-side |
 | `anthropic.Tools.CodeExecution()` | 20260120 | Server-side Python execution | Server-side |
 | `anthropic.Tools.CodeExecution_20250825()` | 20250825 | Earlier code execution version | Server-side |
+| `anthropic.Tools.ToolSearchToolRegex()` | — | Regex-based deferred tool discovery | Server-side |
+| `anthropic.Tools.ToolSearchToolBM25()` | — | BM25-based deferred tool discovery | Server-side |
 
 ### Computer Use
 

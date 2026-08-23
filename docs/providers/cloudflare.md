@@ -67,7 +67,7 @@ Embeddings:
 
 ```go
 emb := cloudflare.Embedding("@cf/baai/bge-base-en-v1.5")
-result, err := goai.Embed(ctx, emb, []string{"hello", "world"})
+result, err := goai.EmbedMany(ctx, emb, []string{"hello", "world"})
 ```
 
 ## Options

@@ -5,7 +5,7 @@ description: "Run local LLMs with Ollama and GoAI. Use Llama, Mistral, and other
 
 # Ollama
 
-[Ollama](https://ollama.com/) provider for local model inference. Ollama exposes an OpenAI-compatible API and requires no authentication by default.
+[Ollama](https://ollama.com/) provider for local model inference. This GoAI provider uses Ollama's native `/api/chat` and `/api/embed` endpoints and requires no authentication by default.
 
 ## Setup
 
@@ -65,7 +65,7 @@ result, err := goai.Embed(ctx, embedModel, "hello world")
 
 ```go
 model := ollama.Chat("llama3",
-    ollama.WithBaseURL("http://192.168.1.100:11434/v1"),
+    ollama.WithBaseURL("http://192.168.1.100:11434"),
 )
 ```
 

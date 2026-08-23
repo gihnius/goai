@@ -296,7 +296,7 @@ func WithMaxRetries(n int) Option
 | Value     | Behavior                                                                                          |
 | --------- | ------------------------------------------------------------------------------------------------- |
 | `n >= 0`  | Retry up to `n` times.                                                                            |
-| `n == -1` | Unlimited retries (useful when the application manages its own timeout/cancellation via context). |
+| `n == -1` | Sets the finite maximum retry count to `2,147,483,647`; context cancellation should bound the call. |
 | `n < -1`  | Clamped to `0` (no retries).                                                                      |
 
 **Default:** `2`. Retries use exponential backoff. Only retryable errors trigger retry (see [Errors](errors.md)).
@@ -384,19 +384,19 @@ func WithOnResponse(fn func(ResponseInfo)) Option
 
 **Default:** `nil`.
 
-> **Panic behavior:** In `GenerateText`, all `StreamText` success paths, `GenerateObject`, `StreamObject` (success path), and `StreamObject` (error path), panics are individually recovered and logged to stderr. In `StreamText`'s first-step error path, panics propagate to the caller.
+> **Panic behavior:** A panic is wrapped as `*PanicError` and returned by synchronous calls or exposed through `stream.Err()`; processing on that path stops.
 
 ### WithOnStepFinish
 
-Sets a callback invoked after each generation step completes, including after tool execution.
+Sets a callback invoked after each model call and before that step's tool execution. `StepResult.ToolResults` is empty at callback time.
 
 ```go
 func WithOnStepFinish(fn func(StepResult)) Option
 ```
 
-**Default:** `nil`. Only relevant when `MaxSteps > 1`.
+**Default:** `nil`. Fires for both single-step and multi-step generation.
 
-> **Panic behavior:** Panics are recovered and logged to stderr.
+> **Panic behavior:** A panic is wrapped as `*PanicError` and returned by synchronous calls or exposed through `stream.Err()`.
 
 ### WithOnToolCallStart
 
@@ -408,7 +408,7 @@ func WithOnToolCallStart(fn func(ToolCallStartInfo)) Option
 
 **Default:** `nil`. Relevant when tools with `Execute` are provided.
 
-> **Panic behavior:** If the callback panics, the tool does not execute and the panic is recovered and logged to stderr.
+> **Panic behavior:** If the callback panics, the tool does not execute; the panic is reported through `OnPanic`.
 
 ### WithOnToolCall
 
@@ -422,7 +422,7 @@ func WithOnToolCall(fn func(ToolCallInfo)) Option
 
 > **Note:** When multiple tools execute in a single step, OnToolCall callbacks fire concurrently from separate goroutines. Order is non-deterministic.
 
-> **Panic behavior:** Panics are recovered and logged to stderr.
+> **Panic behavior:** Panics are reported through `OnPanic`; tool-loop execution remains resilient.
 
 ### WithOnBeforeToolExecute
 
@@ -467,7 +467,7 @@ goai.WithOnFinish(func(info goai.FinishInfo) {
 })
 ```
 
-Called once after all generation steps complete. Fires in all code paths: `GenerateText`, `StreamText`, `GenerateObject` (including max_steps error), and `StreamObject`. Does NOT fire when DoGenerate/DoStream returns a provider error. Multiple callbacks supported (append). A panic surfaces as `*PanicError`, and subsequent `OnFinish` callbacks do not run.
+Called once after generation terminates. `GenerateText` and `GenerateObject` also fire it on `DoGenerate` errors with `StoppedBy: StopCauseAbort`; an initial `DoStream` error returns before stream-level `OnFinish`. Multiple callbacks are supported (append). A panic surfaces as `*PanicError`, and subsequent `OnFinish` callbacks do not run.
 
 `FinishInfo.StepsExhausted` is the authoritative signal for max-steps exhaustion -- it is not available from any per-step hook.
 
