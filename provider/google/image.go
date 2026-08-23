@@ -81,6 +81,9 @@ type imagenModel struct {
 func (m *imagenModel) ModelID() string { return m.id }
 
 func (m *imagenModel) DoGenerate(ctx context.Context, params provider.ImageParams) (*provider.ImageResult, error) {
+	if err := validateNonChatOptions(m.opts); err != nil {
+		return nil, err
+	}
 	token, err := m.resolveToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving auth token: %w", err)
@@ -188,6 +191,9 @@ type geminiImageModel struct {
 func (m *geminiImageModel) ModelID() string { return m.id }
 
 func (m *geminiImageModel) DoGenerate(ctx context.Context, params provider.ImageParams) (*provider.ImageResult, error) {
+	if err := validateNonChatOptions(m.opts); err != nil {
+		return nil, err
+	}
 	token, err := m.resolveToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving auth token: %w", err)

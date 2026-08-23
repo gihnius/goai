@@ -45,6 +45,9 @@ func (m *embeddingModel) ModelID() string { return m.id }
 func (m *embeddingModel) MaxValuesPerCall() int { return 250 }
 
 func (m *embeddingModel) DoEmbed(ctx context.Context, values []string, params provider.EmbedParams) (*provider.EmbedResult, error) {
+	if err := validateNonChatOptions(m.opts, "Embedding"); err != nil {
+		return nil, err
+	}
 	// Extract vertex-specific options.
 	var vopts map[string]any
 	if v, ok := params.ProviderOptions["vertex"].(map[string]any); ok {
