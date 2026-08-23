@@ -91,7 +91,7 @@ func TestChat_NativeGeminiVertex(t *testing.T) {
 		WithProject("my-proj"),
 		WithLocation("global"),
 		WithTokenSource(provider.StaticToken("oauth-token")),
-		WithBaseURL(server.URL+"/models"),
+		WithNativeBaseURL(server.URL+"/models"),
 		WithHeaders(map[string]string{"X-Custom": "value"}),
 		WithHTTPClient(server.Client()))
 
@@ -109,33 +109,47 @@ func TestChat_NativeGeminiVertex(t *testing.T) {
 	}
 }
 
-func TestChat_NativeGeminiAPIKeyFallback(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("x-goog-api-key"); got != "api-key" {
-			t.Errorf("x-goog-api-key = %q, want api-key", got)
-		}
-		if r.Header.Get("Authorization") != "" {
-			t.Error("Gemini API fallback must not send Authorization")
-		}
-		if !strings.HasSuffix(r.URL.Path, "/v1beta/models/gemini-2.5-flash:generateContent") {
-			t.Errorf("path = %q, want Gemini native endpoint", r.URL.Path)
-		}
-		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"fallback"}]},"finishReason":"STOP"}]}`)
-	}))
-	defer server.Close()
-
+func TestChat_NativeGeminiRejectsAPIKey(t *testing.T) {
 	model := Chat("gemini-2.5-flash",
 		WithNativeGemini(),
-		WithAPIKey("api-key"),
-		WithBaseURL(server.URL))
-	result, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		WithAPIKey("api-key"))
+	_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "OAuth token source") {
+		t.Fatalf("DoGenerate() error = %v, want OAuth token source error", err)
 	}
-	if result.Text != "fallback" {
-		t.Errorf("Text = %q, want fallback", result.Text)
+}
+
+func TestChat_NativeGeminiRejectsCompatBaseURL(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithNativeGemini(),
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		WithBaseURL("https://compat.example.test"))
+	if got := model.ModelID(); got != "gemini-2.5-pro" {
+		t.Errorf("ModelID() = %q, want gemini-2.5-pro", got)
+	}
+	params := provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	}
+	want := "use WithNativeBaseURL"
+	if _, err := model.DoGenerate(t.Context(), params); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("DoGenerate() error = %v, want %q", err, want)
+	}
+	if _, err := model.DoStream(t.Context(), params); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("DoStream() error = %v, want %q", err, want)
+	}
+}
+
+func TestChat_NativeBaseURLRequiresNativeTransport(t *testing.T) {
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("oauth-token")),
+		WithNativeBaseURL("https://vertex.example.test/models"))
+	_, err := model.DoGenerate(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires WithNativeGemini") {
+		t.Fatalf("DoGenerate() error = %v, want native transport error", err)
 	}
 }
 
