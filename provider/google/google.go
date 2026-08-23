@@ -305,16 +305,6 @@ func (m *chatModel) buildRequest(params provider.GenerateParams) (geminiRequestB
 			toolConfig["retrievalConfig"] = rc
 		}
 	}
-	// Gemini 3.x supports this additional toolConfig field. Accept only the
-	// documented boolean from the Google namespace; SDK-derived fields above
-	// must not be overridden by raw provider options.
-	if gopts != nil {
-		if tc, ok := gopts["toolConfig"].(map[string]any); ok {
-			if include, ok := tc["includeServerSideToolInvocations"].(bool); ok {
-				toolConfig["includeServerSideToolInvocations"] = include
-			}
-		}
-	}
 
 	if len(toolConfig) > 0 {
 		body.ToolConfig = toolConfig
