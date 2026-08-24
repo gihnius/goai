@@ -1,0 +1,652 @@
+package openai
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/zendev-sh/goai"
+	"github.com/zendev-sh/goai/provider"
+)
+
+const completedResponsesEvent = "event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\",\"model\":\"o3\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+
+func isResponsesIdleTimeout(err error) bool {
+	var target *StreamIdleTimeoutError
+	return errors.As(err, &target)
+}
+
+func isResponsesProtocolError(err error) bool {
+	var target *StreamProtocolError
+	return errors.As(err, &target)
+}
+
+type blockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+	closeCount  atomic.Int32
+}
+
+type blockingCloseReadCloser struct {
+	readStarted  chan struct{}
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	releaseRead  chan struct{}
+	readDone     chan struct{}
+	readOnce     sync.Once
+	closeOnce    sync.Once
+}
+
+func newBlockingCloseReadCloser() *blockingCloseReadCloser {
+	return &blockingCloseReadCloser{
+		readStarted:  make(chan struct{}),
+		closeStarted: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+		releaseRead:  make(chan struct{}),
+		readDone:     make(chan struct{}),
+	}
+}
+
+func (r *blockingCloseReadCloser) Read(_ []byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.releaseRead
+	close(r.readDone)
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingCloseReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closeStarted) })
+	<-r.releaseClose
+	close(r.releaseRead)
+	return nil
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (r *blockingReadCloser) Read(_ []byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.closeCount.Add(1)
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
+}
+
+func TestResponsesStreamIdleTimeoutErrorContract(t *testing.T) {
+	body := newBlockingReadCloser()
+	out := make(chan provider.StreamChunk, 4)
+	idle := 25 * time.Millisecond
+	go streamResponsesWithConfig(t.Context(), body, out, responsesStreamConfig{idleTimeout: idle})
+
+	select {
+	case <-body.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stream reader did not start")
+	}
+
+	chunk := receiveChunk(t, out)
+	if chunk.Type != provider.ChunkError {
+		t.Fatalf("chunk type = %q, want %q", chunk.Type, provider.ChunkError)
+	}
+	var idleErr *StreamIdleTimeoutError
+	if !errors.As(chunk.Error, &idleErr) {
+		t.Fatalf("error = %T %v, want *StreamIdleTimeoutError", chunk.Error, chunk.Error)
+	}
+	if idleErr.Idle != idle || !isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("idle error = %#v", idleErr)
+	}
+	var netErr net.Error
+	if !errors.As(chunk.Error, &netErr) || !netErr.Timeout() {
+		t.Fatalf("error does not satisfy transient net.Error timeout contract: %v", chunk.Error)
+	}
+
+	drainChunks(t, out)
+	if got := body.closeCount.Load(); got != 1 {
+		t.Fatalf("body Close calls = %d, want 1", got)
+	}
+}
+
+func TestResponsesStreamEventActivityResetsIdleTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		data      string
+	}{
+		{name: "in progress", eventType: "response.in_progress", data: `{"response":{"id":"resp_1"}}`},
+		{name: "unknown valid event", eventType: "response.rate_limits.updated", data: `{"remaining":10}`},
+		{name: "malformed nonterminal event", eventType: "response.metadata", data: `{not-json}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader, writer := io.Pipe()
+			out := make(chan provider.StreamChunk, 8)
+			go streamResponsesWithConfig(t.Context(), reader, out, responsesStreamConfig{
+				idleTimeout: 200 * time.Millisecond,
+			})
+
+			writerDone := make(chan struct{})
+			go func() {
+				defer close(writerDone)
+				defer func() { _ = writer.Close() }()
+				for range 5 {
+					time.Sleep(50 * time.Millisecond)
+					if _, err := io.WriteString(writer, sseLine(tt.eventType, tt.data)); err != nil {
+						return
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+				_, _ = io.WriteString(writer, completedResponsesEvent)
+			}()
+
+			var gotFinish, gotError bool
+			for chunk := range out {
+				gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+				gotError = gotError || chunk.Type == provider.ChunkError
+			}
+			<-writerDone
+			if !gotFinish || gotError {
+				t.Fatalf("finish = %v, error = %v", gotFinish, gotError)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamOutputBackpressureDoesNotCauseIdleTimeout(t *testing.T) {
+	idle := 10 * time.Millisecond
+	input := sseLine("response.output_text.delta", `{"delta":"hello"}`) + completedResponsesEvent
+
+	for range 20 {
+		out := make(chan provider.StreamChunk)
+		go streamResponsesWithConfig(t.Context(), io.NopCloser(strings.NewReader(input)), out, responsesStreamConfig{
+			idleTimeout: idle,
+		})
+
+		// Keep projection blocked beyond the idle window while the reader queues
+		// the already-complete terminal event.
+		time.Sleep(3 * idle)
+
+		var gotFinish bool
+		for chunk := range out {
+			if isResponsesIdleTimeout(chunk.Error) {
+				t.Fatal("downstream backpressure was reported as provider inactivity")
+			}
+			if chunk.Type == provider.ChunkError {
+				t.Fatalf("unexpected stream error: %v", chunk.Error)
+			}
+			gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+		}
+		if !gotFinish {
+			t.Fatal("stream did not finish after downstream resumed")
+		}
+	}
+}
+
+func TestResponsesStreamCommentsDoNotResetIdleTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(t.Context(), reader, out, responsesStreamConfig{idleTimeout: 60 * time.Millisecond})
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer func() { _ = writer.Close() }()
+		for {
+			time.Sleep(15 * time.Millisecond)
+			if _, err := io.WriteString(writer, ": ping\n\n"); err != nil {
+				return
+			}
+		}
+	}()
+
+	chunk := receiveChunk(t, out)
+	if !isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want idle timeout", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+	<-writerDone
+}
+
+func TestResponsesStreamPartialEventDoesNotResetIdleTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(t.Context(), reader, out, responsesStreamConfig{idleTimeout: 40 * time.Millisecond})
+
+	if _, err := io.WriteString(writer, "event: response.in_progress\n"); err != nil {
+		t.Fatalf("write partial event: %v", err)
+	}
+	chunk := receiveChunk(t, out)
+	if !isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want idle timeout", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+	_ = writer.Close()
+}
+
+func TestResponsesStreamReasoningThenIdleTimeout(t *testing.T) {
+	reader, writer := io.Pipe()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(t.Context(), reader, out, responsesStreamConfig{idleTimeout: 40 * time.Millisecond})
+
+	input := sseLine("response.reasoning_summary_text.delta", `{"item_id":"rs_1","summary_index":0,"delta":"thinking"}`)
+	if _, err := io.WriteString(writer, input); err != nil {
+		t.Fatalf("write reasoning event: %v", err)
+	}
+	if chunk := receiveChunk(t, out); chunk.Type != provider.ChunkReasoning || chunk.Text != "thinking" {
+		t.Fatalf("reasoning chunk = %#v", chunk)
+	}
+	if chunk := receiveChunk(t, out); !isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want idle timeout", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+	_ = writer.Close()
+}
+
+func TestResponsesStreamZeroIdleTimeoutDisablesWatchdog(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	body := newBlockingReadCloser()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(ctx, body, out, responsesStreamConfig{})
+
+	select {
+	case chunk := <-out:
+		t.Fatalf("received chunk with disabled watchdog: %#v", chunk)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+
+	chunk := receiveChunk(t, out)
+	if !errors.Is(chunk.Error, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", chunk.Error)
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamCallerCancellationIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	body := newBlockingReadCloser()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(ctx, body, out, responsesStreamConfig{idleTimeout: time.Second})
+
+	select {
+	case <-body.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stream reader did not start")
+	}
+	cancel()
+
+	chunk := receiveChunk(t, out)
+	if !errors.Is(chunk.Error, context.Canceled) || isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want context.Canceled", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamCallerDeadlineIdentity(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancel()
+	body := newBlockingReadCloser()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(ctx, body, out, responsesStreamConfig{idleTimeout: time.Second})
+
+	chunk := receiveChunk(t, out)
+	if !errors.Is(chunk.Error, context.DeadlineExceeded) || isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want context.DeadlineExceeded", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamTerminalClosesBlockedBody(t *testing.T) {
+	reader, writer := io.Pipe()
+	body := &countingReadCloser{ReadCloser: reader}
+	out := make(chan provider.StreamChunk, 8)
+	go streamResponsesWithConfig(t.Context(), body, out, responsesStreamConfig{idleTimeout: time.Second})
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(writer, completedResponsesEvent)
+		writeDone <- err
+	}()
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write terminal event: %v", err)
+	}
+
+	var gotFinish bool
+	for chunk := range out {
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+	}
+	if !gotFinish {
+		t.Fatal("terminal event did not emit finish chunk")
+	}
+	if got := body.closeCount.Load(); got != 1 {
+		t.Fatalf("body Close calls = %d, want 1", got)
+	}
+	if _, err := io.WriteString(writer, "still open"); err == nil {
+		t.Fatal("body remained open after terminal event")
+	}
+	_ = writer.Close()
+}
+
+func TestResponsesStreamBlockingBodyCloseDoesNotBlockOutput(t *testing.T) {
+	body := newBlockingCloseReadCloser()
+	out := make(chan provider.StreamChunk, 4)
+	go streamResponsesWithConfig(t.Context(), body, out, responsesStreamConfig{idleTimeout: 20 * time.Millisecond})
+
+	select {
+	case <-body.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stream reader did not start")
+	}
+
+	chunk := receiveChunk(t, out)
+	if !isResponsesIdleTimeout(chunk.Error) {
+		t.Fatalf("error = %T %v, want idle timeout", chunk.Error, chunk.Error)
+	}
+	select {
+	case <-body.closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("body Close did not start")
+	}
+
+	// Close remains blocked, but the coordinator must still finish after its
+	// bounded reader wait and close the output channel.
+	drainChunks(t, out)
+	close(body.releaseClose)
+	select {
+	case <-body.readDone:
+	case <-time.After(time.Second):
+		t.Fatal("stream reader did not exit after releasing body Close")
+	}
+}
+
+func TestResponsesStreamProtocolErrorContract(t *testing.T) {
+	out := make(chan provider.StreamChunk, 4)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader("event: response.created\ndata: {}\n\n")), out)
+
+	chunk := receiveChunk(t, out)
+	var protocolErr *StreamProtocolError
+	if !errors.As(chunk.Error, &protocolErr) || !isResponsesProtocolError(chunk.Error) {
+		t.Fatalf("error = %T %v, want *StreamProtocolError", chunk.Error, chunk.Error)
+	}
+	if protocolErr.Provider != responsesStreamProvider || protocolErr.API != responsesStreamAPI {
+		t.Fatalf("protocol error = %#v", protocolErr)
+	}
+	if strings.Contains(protocolErr.Error(), "response.created") {
+		t.Fatalf("premature EOF error unexpectedly includes event payload/type: %q", protocolErr.Error())
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamRejectsMismatchedTerminalPayloadType(t *testing.T) {
+	input := sseLine(
+		"response.completed",
+		`{"type":"response.failed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
+	)
+	out := make(chan provider.StreamChunk, 4)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+	chunk := receiveChunk(t, out)
+	var protocolErr *StreamProtocolError
+	if !errors.As(chunk.Error, &protocolErr) || protocolErr.EventType != "response.completed" {
+		t.Fatalf("error = %T %v, want terminal payload mismatch", chunk.Error, chunk.Error)
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamTerminalUsageCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		usage        string
+		wantFinish   bool
+		wantProtocol bool
+		wantInput    int
+		wantOutput   int
+	}{
+		{name: "usage omitted", wantFinish: true},
+		{name: "complete usage", usage: `,"usage":{"input_tokens":3,"output_tokens":2}`, wantFinish: true, wantInput: 3, wantOutput: 2},
+		{name: "empty usage", usage: `,"usage":{}`, wantProtocol: true},
+		{name: "missing input tokens", usage: `,"usage":{"output_tokens":2}`, wantProtocol: true},
+		{name: "missing output tokens", usage: `,"usage":{"input_tokens":3}`, wantProtocol: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := `{"response":{"id":"resp_1"` + tt.usage + `}}`
+			out := make(chan provider.StreamChunk, 4)
+			streamResponses(t.Context(), io.NopCloser(strings.NewReader(sseLine("response.completed", payload))), out)
+
+			var gotFinish bool
+			var gotProtocol bool
+			for chunk := range out {
+				gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+				var protocolErr *StreamProtocolError
+				gotProtocol = gotProtocol || errors.As(chunk.Error, &protocolErr)
+				if chunk.Type == provider.ChunkFinish && (chunk.Usage.InputTokens != tt.wantInput || chunk.Usage.OutputTokens != tt.wantOutput) {
+					t.Fatalf("finish usage = %#v, want %d input and %d output tokens", chunk.Usage, tt.wantInput, tt.wantOutput)
+				}
+			}
+			if gotFinish != tt.wantFinish || gotProtocol != tt.wantProtocol {
+				t.Fatalf("finish = %v, protocol error = %v; want finish = %v, protocol error = %v", gotFinish, gotProtocol, tt.wantFinish, tt.wantProtocol)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamOptions(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		model := Chat("o3", WithAPIKey("key")).(*chatModel)
+		if got := model.opts.responsesStreamIdleTimeout; got != DefaultResponsesStreamIdleTimeout {
+			t.Fatalf("default idle timeout = %s, want %s", got, DefaultResponsesStreamIdleTimeout)
+		}
+	})
+
+	t.Run("override", func(t *testing.T) {
+		model := Chat(
+			"o3",
+			WithAPIKey("key"),
+			WithResponsesStreamIdleTimeout(3*time.Second),
+		).(*chatModel)
+		if got := model.opts.responsesStreamIdleTimeout; got != 3*time.Second {
+			t.Fatalf("idle timeout = %s, want 3s", got)
+		}
+	})
+
+	t.Run("done compatibility", func(t *testing.T) {
+		model := Chat(
+			"gpt-5",
+			WithAPIKey("key"),
+			WithResponsesStreamDoneCompatibility(true),
+		).(*chatModel)
+		if !model.opts.responsesStreamAllowDone {
+			t.Fatal("[DONE] compatibility option was not applied")
+		}
+	})
+
+	t.Run("negative rejected before request", func(t *testing.T) {
+		model := Chat(
+			"o3",
+			WithAPIKey("key"),
+			WithBaseURL("http://invalid.invalid"),
+			WithResponsesStreamIdleTimeout(-time.Second),
+		)
+		result, err := model.DoStream(t.Context(), provider.GenerateParams{})
+		if err == nil || result != nil {
+			t.Fatalf("DoStream() = (%v, %v), want nil result and configuration error", result, err)
+		}
+		if !strings.Contains(err.Error(), "must be non-negative") {
+			t.Fatalf("error = %q", err)
+		}
+	})
+
+	t.Run("chat completions unaffected", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		}))
+		defer server.Close()
+
+		model := Chat(
+			"gpt-4o",
+			WithAPIKey("key"),
+			WithBaseURL(server.URL),
+			WithResponsesStreamIdleTimeout(-time.Second),
+		)
+		result, err := model.DoStream(t.Context(), provider.GenerateParams{ProviderOptions: chatCompletionsOpts})
+		if err != nil {
+			t.Fatalf("DoStream() error = %v", err)
+		}
+		var gotFinish bool
+		for chunk := range result.Stream {
+			gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+		}
+		if !gotFinish {
+			t.Fatal("Chat Completions stream did not preserve [DONE] behavior")
+		}
+	})
+}
+
+func TestResponsesStreamErrorPropagatesThroughTextStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sseLine("response.created", `{"response":{"id":"resp_1"}}`))
+	}))
+	defer server.Close()
+
+	model := Chat("o3", WithAPIKey("key"), WithBaseURL(server.URL))
+	stream, err := goai.StreamText(t.Context(), model, goai.WithPrompt("hi"))
+	if err != nil {
+		t.Fatalf("StreamText() error = %v", err)
+	}
+	stream.Result()
+	var protocolErr *StreamProtocolError
+	if err := stream.Err(); !errors.As(err, &protocolErr) {
+		t.Fatalf("stream.Err() = %T %v, want *StreamProtocolError", err, err)
+	}
+}
+
+func TestResponsesStreamTerminalRaces(t *testing.T) {
+	t.Run("completion and cancellation", func(t *testing.T) {
+		for range 100 {
+			ctx, cancel := context.WithCancel(t.Context())
+			reader, writer := io.Pipe()
+			body := &countingReadCloser{ReadCloser: reader}
+			out := make(chan provider.StreamChunk, 8)
+			go streamResponsesWithConfig(ctx, body, out, responsesStreamConfig{idleTimeout: time.Second})
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				<-start
+				_, _ = io.WriteString(writer, completedResponsesEvent)
+			})
+			wg.Go(func() {
+				<-start
+				cancel()
+			})
+			close(start)
+
+			terminalOutcomes := countTerminalOutcomes(out)
+			wg.Wait()
+			_ = writer.Close()
+			if terminalOutcomes > 1 {
+				t.Fatalf("terminal outcomes = %d, want at most 1", terminalOutcomes)
+			}
+			if got := body.closeCount.Load(); got != 1 {
+				t.Fatalf("body Close calls = %d, want 1", got)
+			}
+		}
+	})
+
+	t.Run("completion and timeout", func(t *testing.T) {
+		for range 50 {
+			reader, writer := io.Pipe()
+			body := &countingReadCloser{ReadCloser: reader}
+			out := make(chan provider.StreamChunk, 8)
+			go streamResponsesWithConfig(t.Context(), body, out, responsesStreamConfig{idleTimeout: 2 * time.Millisecond})
+
+			writerDone := make(chan struct{})
+			go func() {
+				defer close(writerDone)
+				time.Sleep(2 * time.Millisecond)
+				_, _ = io.WriteString(writer, completedResponsesEvent)
+			}()
+			terminalOutcomes := countTerminalOutcomes(out)
+			<-writerDone
+			_ = writer.Close()
+			if terminalOutcomes != 1 {
+				t.Fatalf("terminal outcomes = %d, want 1", terminalOutcomes)
+			}
+			if got := body.closeCount.Load(); got != 1 {
+				t.Fatalf("body Close calls = %d, want 1", got)
+			}
+		}
+	})
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	closeCount atomic.Int32
+}
+
+func (r *countingReadCloser) Close() error {
+	r.closeCount.Add(1)
+	return r.ReadCloser.Close()
+}
+
+func receiveChunk(t *testing.T, out <-chan provider.StreamChunk) provider.StreamChunk {
+	t.Helper()
+	select {
+	case chunk, ok := <-out:
+		if !ok {
+			t.Fatal("stream closed without a chunk")
+		}
+		return chunk
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream chunk")
+		return provider.StreamChunk{}
+	}
+}
+
+func drainChunks(t *testing.T, out <-chan provider.StreamChunk) {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for stream close")
+		}
+	}
+}
+
+func countTerminalOutcomes(out <-chan provider.StreamChunk) int {
+	var count int
+	for chunk := range out {
+		if chunk.Type == provider.ChunkFinish || chunk.Type == provider.ChunkError {
+			count++
+		}
+	}
+	return count
+}

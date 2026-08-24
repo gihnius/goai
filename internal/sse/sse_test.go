@@ -355,3 +355,80 @@ func TestScanner_NextLine_LargeLine(t *testing.T) {
 		t.Errorf("got len=%d, want %d", len(got), len("data: ")+len(payload))
 	}
 }
+
+func TestScanner_NextEvent(t *testing.T) {
+	input := strings.Join([]string{
+		": ignored comment",
+		"event:first",
+		"data:{\"part\":1}",
+		"data: {\"part\":2}",
+		"",
+		"event: second\r",
+		"data: payload\r",
+		"\r",
+	}, "\n")
+	s := NewScanner(strings.NewReader(input))
+
+	first, ok := s.NextEvent()
+	if !ok {
+		t.Fatal("NextEvent() did not return first event")
+	}
+	if first.Type != "first" || string(first.Data) != "{\"part\":1}\n{\"part\":2}" {
+		t.Fatalf("first event = %#v", first)
+	}
+
+	second, ok := s.NextEvent()
+	if !ok {
+		t.Fatal("NextEvent() did not return second event")
+	}
+	if second.Type != "second" || string(second.Data) != "payload" {
+		t.Fatalf("second event = %#v", second)
+	}
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an event after EOF")
+	}
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v", err)
+	}
+}
+
+func TestScanner_NextEvent_IgnoresCommentsAndEmptyFrames(t *testing.T) {
+	input := ": ping\n\n\nevent: metadata\n\ndata: value\n\n"
+	s := NewScanner(strings.NewReader(input))
+
+	event, ok := s.NextEvent()
+	if !ok {
+		t.Fatal("NextEvent() did not return data event")
+	}
+	if event.Type != "" || string(event.Data) != "value" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestScanner_NextEvent_FinalPartialEvent(t *testing.T) {
+	s := NewScanner(strings.NewReader("event: final\ndata: payload"))
+
+	event, ok := s.NextEvent()
+	if !ok {
+		t.Fatal("NextEvent() did not return final partial event")
+	}
+	if event.Type != "final" || string(event.Data) != "payload" {
+		t.Fatalf("event = %#v", event)
+	}
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an event after EOF")
+	}
+}
+
+func TestScanner_NextEvent_EventExceedsMaxSize(t *testing.T) {
+	line := strings.Repeat("x", MaxEventSize/2)
+	input := "data: " + line + "\ndata: " + line + "\ndata: x\n\n"
+	s := NewScanner(strings.NewReader(input))
+
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() succeeded for oversized event")
+	}
+	if err := s.Err(); err == nil || !strings.Contains(err.Error(), "event exceeds") {
+		t.Fatalf("Err() = %v, want event size error", err)
+	}
+}

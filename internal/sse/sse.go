@@ -1,6 +1,6 @@
 // Package sse provides a scanner for Server-Sent Events (SSE) streams.
 //
-// It handles the "data: " prefix, blank line skipping, and [DONE] sentinel.
+// It handles data payloads, complete event framing, and the [DONE] sentinel.
 // JSON deserialization is left to the caller.
 package sse
 
@@ -20,6 +20,17 @@ import (
 // (a DoS vector). Lines exceeding this size cause Next to stop and Err to
 // report the violation.
 const MaxLineSize = 16 << 20 // 16 MiB
+
+// MaxEventSize is the upper bound on the aggregate data payload of one SSE
+// event, in bytes. Multi-line data fields are joined with a single newline.
+const MaxEventSize = 16 << 20 // 16 MiB
+
+// Event is one complete SSE event. Type is empty when the event field was not
+// present. Data contains all data fields joined with a newline.
+type Event struct {
+	Type string
+	Data []byte
+}
 
 // Scanner reads SSE data payloads from an io.Reader.
 type Scanner struct {
@@ -61,6 +72,65 @@ func (s *Scanner) NextLine() (line string, ok bool) {
 		}
 	}
 	return strings.TrimRight(raw, "\r\n"), true
+}
+
+// NextEvent returns the next complete SSE event. Comments and events without
+// data fields are ignored. A final event without a trailing blank line is
+// returned at EOF. Field values may omit the optional space after the colon.
+//
+// Mix NextEvent with Next or NextLine on the same scanner at your own risk;
+// pick one mode per stream.
+func (s *Scanner) NextEvent() (Event, bool) {
+	if s.err != nil {
+		return Event{}, false
+	}
+
+	var event Event
+	var hasData bool
+	for {
+		raw, err := s.readLine()
+		if len(raw) > 0 {
+			line := strings.TrimRight(raw, "\r\n")
+			if line == "" {
+				if hasData {
+					return event, true
+				}
+				event.Type = ""
+			} else if line[0] != ':' {
+				field, value, _ := strings.Cut(line, ":")
+				value = strings.TrimPrefix(value, " ")
+				switch field {
+				case "event":
+					event.Type = value
+				case "data":
+					additional := len(value)
+					if hasData {
+						additional++
+					}
+					if len(event.Data)+additional > MaxEventSize {
+						s.err = fmt.Errorf("sse: event exceeds %d bytes", MaxEventSize)
+						return Event{}, false
+					}
+					if hasData {
+						event.Data = append(event.Data, '\n')
+					}
+					event.Data = append(event.Data, value...)
+					hasData = true
+				}
+			}
+		}
+
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				s.err = err
+				return Event{}, false
+			}
+			if hasData {
+				return event, true
+			}
+			return Event{}, false
+		}
+	}
 }
 
 // Next returns the next SSE data payload (with "data: " prefix stripped).

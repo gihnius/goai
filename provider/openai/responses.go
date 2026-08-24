@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/zendev-sh/goai"
-	"github.com/zendev-sh/goai/internal/sse"
 	"github.com/zendev-sh/goai/provider"
 )
 
@@ -530,17 +529,27 @@ func openAIReasoningPart(itemID, text, encryptedContent string) provider.Part {
 // together and merges the markdown at the seam.
 const summarySeparator = "\n\n"
 
-// streamResponses parses SSE from the OpenAI Responses API.
-// Uses sse.Scanner.NextLine because the Responses API has event-typed SSE
-// (event: + data: pairs), unlike Chat Completions (data: only).
+// streamResponses parses SSE from the OpenAI Responses API with the default
+// event-level idle timeout.
 func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provider.StreamChunk) {
-	defer close(out)
-	defer func() { _ = body.Close() }()
+	streamResponsesWithConfig(ctx, body, out, defaultResponsesStreamConfig())
+}
 
-	scanner := sse.NewScanner(body)
+func streamResponsesWithConfig(
+	ctx context.Context,
+	body io.ReadCloser,
+	out chan<- provider.StreamChunk,
+	config responsesStreamConfig,
+) {
+	defer close(out)
+
+	reader := newResponsesEventReader(ctx, body)
+	defer reader.close()
+
+	idleTimer := newResponsesIdleTimer(config.idleTimeout)
+	defer idleTimer.stop()
 
 	var usage provider.Usage
-	var eventType string
 	var hasFunctionCall bool
 
 	activeTools := make(map[int]*responsesToolCall)
@@ -548,26 +557,59 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 	currentReasoningIdx := -1
 
 	for {
-		line, ok := scanner.NextLine()
-		if !ok {
-			break
-		}
-
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-			continue
-		}
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-
-		if data == "[DONE]" {
-			if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkFinish, Usage: usage}) {
+		var read responsesReadResult
+		select {
+		case <-ctx.Done():
+			trySendResponsesError(ctx, out, ctx.Err())
+			return
+		case <-idleTimer.c:
+			if err := ctx.Err(); err != nil {
+				trySendResponsesError(ctx, out, err)
 				return
 			}
+			err := &StreamIdleTimeoutError{
+				Provider: responsesStreamProvider,
+				API:      responsesStreamAPI,
+				Idle:     config.idleTimeout,
+			}
+			trySendResponsesError(ctx, out, err)
 			return
+		case read = <-reader.results:
+		}
+
+		if err := ctx.Err(); err != nil {
+			trySendResponsesError(ctx, out, err)
+			return
+		}
+		if read.err != nil {
+			trySendResponsesError(ctx, out, newStreamProtocolError("", "stream read failed", read.err))
+			return
+		}
+		if read.eof {
+			trySendResponsesError(ctx, out, newStreamProtocolError("", "stream ended before a terminal event", nil))
+			return
+		}
+
+		eventType := read.event.Type
+		data := string(read.event.Data)
+		terminalEvent := isResponsesTerminalEvent(eventType)
+
+		if data == "[DONE]" {
+			if config.allowDone {
+				provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkFinish, Usage: usage})
+				return
+			}
+			trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "stream ended with [DONE] before a terminal event", nil))
+			return
+		}
+		if !json.Valid(read.event.Data) {
+			err := newStreamProtocolError(eventType, "event data is not valid JSON", nil)
+			if terminalEvent {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			idleTimer.reset(config.idleTimeout)
+			continue
 		}
 
 		switch eventType {
@@ -793,15 +835,16 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 
 		case "response.completed", "response.incomplete":
 			var ev struct {
-				Response struct {
+				Type     string `json:"type"`
+				Response *struct {
 					ID                string `json:"id"`
 					Model             string `json:"model"`
 					IncompleteDetails *struct {
 						Reason string `json:"reason"`
 					} `json:"incomplete_details"`
-					Usage struct {
-						InputTokens         int `json:"input_tokens"`
-						OutputTokens        int `json:"output_tokens"`
+					Usage *struct {
+						InputTokens         *int `json:"input_tokens"`
+						OutputTokens        *int `json:"output_tokens"`
 						OutputTokensDetails *struct {
 							ReasoningTokens int `json:"reasoning_tokens"`
 						} `json:"output_tokens_details"`
@@ -811,15 +854,31 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 					} `json:"usage"`
 				} `json:"response"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				usage.InputTokens = ev.Response.Usage.InputTokens
-				usage.OutputTokens = ev.Response.Usage.OutputTokens
-				usage.TotalTokens = ev.Response.Usage.InputTokens + ev.Response.Usage.OutputTokens
-				if ev.Response.Usage.OutputTokensDetails != nil {
-					usage.ReasoningTokens = ev.Response.Usage.OutputTokensDetails.ReasoningTokens
+			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
+				return
+			}
+			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.Response == nil {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "terminal event is missing response", nil))
+				return
+			}
+			if responseUsage := ev.Response.Usage; responseUsage != nil {
+				if responseUsage.InputTokens == nil || responseUsage.OutputTokens == nil {
+					trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "terminal event has incomplete response usage", nil))
+					return
 				}
-				if ev.Response.Usage.InputTokensDetails != nil {
-					usage.CacheReadTokens = ev.Response.Usage.InputTokensDetails.CachedTokens
+				usage.InputTokens = *responseUsage.InputTokens
+				usage.OutputTokens = *responseUsage.OutputTokens
+				usage.TotalTokens = *responseUsage.InputTokens + *responseUsage.OutputTokens
+				if responseUsage.OutputTokensDetails != nil {
+					usage.ReasoningTokens = responseUsage.OutputTokensDetails.ReasoningTokens
+				}
+				if responseUsage.InputTokensDetails != nil {
+					usage.CacheReadTokens = responseUsage.InputTokensDetails.CachedTokens
 				}
 				usage.InputTokens -= usage.CacheReadTokens
 			}
@@ -860,23 +919,35 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 
 		case "response.failed":
 			var ev struct {
-				Response struct {
+				Type     string `json:"type"`
+				Response *struct {
 					Error struct {
 						Message string `json:"message"`
 						Code    string `json:"code"`
 					} `json:"error"`
 				} `json:"response"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				if !provider.TrySend(ctx, out, responsesStreamError(data, ev.Response.Error.Message, ev.Response.Error.Code, "response failed")) {
-					return
-				}
+			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
+				return
+			}
+			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.Response == nil {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "terminal event is missing response", nil))
+				return
+			}
+			if !provider.TrySend(ctx, out, responsesStreamError(data, ev.Response.Error.Message, ev.Response.Error.Code, "response failed")) {
+				return
 			}
 			return
 
 		case "error":
 			// OpenAI documents flat message/code fields, but production often nests them under error.
 			var ev struct {
+				Type    string `json:"type"`
 				Message string `json:"message"`
 				Code    string `json:"code"`
 				Error   *struct {
@@ -884,30 +955,37 @@ func streamResponses(ctx context.Context, body io.ReadCloser, out chan<- provide
 					Code    string `json:"code"`
 				} `json:"error"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				// Prefer the nested error fields when present, but fall back to
-				// the flat fields per-field so a partial nested object (e.g. a
-				// nested code with no nested message) does not clobber a flat
-				// message/code with an empty string.
-				msg, code := ev.Message, ev.Code
-				if ev.Error != nil {
-					msg = cmp.Or(ev.Error.Message, msg)
-					code = cmp.Or(ev.Error.Code, code)
-				}
-				if !provider.TrySend(ctx, out, responsesStreamError(data, msg, code, "stream error")) {
-					return
-				}
+			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
+				return
+			}
+			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			// Prefer the nested error fields when present, but fall back to
+			// the flat fields per-field so a partial nested object (e.g. a
+			// nested code with no nested message) does not clobber a flat
+			// message/code with an empty string.
+			msg, code := ev.Message, ev.Code
+			if ev.Error != nil {
+				msg = cmp.Or(ev.Error.Message, msg)
+				code = cmp.Or(ev.Error.Code, code)
+			}
+			if msg == "" && code == "" {
+				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "terminal error event is missing error details", nil))
+				return
+			}
+			if !provider.TrySend(ctx, out, responsesStreamError(data, msg, code, "stream error")) {
+				return
 			}
 			return
 		}
 
-		eventType = ""
-	}
-
-	if err := scanner.Err(); err != nil {
-		if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkError, Error: fmt.Errorf("reading stream: %w", err)}) {
-			return
-		}
+		// Projection may block on downstream backpressure. Restart the provider
+		// idle window only after projection completes so consumer latency cannot
+		// be misreported as provider inactivity.
+		idleTimer.reset(config.idleTimeout)
 	}
 }
 

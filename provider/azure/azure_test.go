@@ -3,12 +3,14 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendev-sh/goai/provider"
 	"github.com/zendev-sh/goai/provider/openai"
@@ -65,6 +67,78 @@ func TestChat_Stream(t *testing.T) {
 	}
 	if len(texts) != 1 || texts[0] != "Hello" {
 		t.Errorf("texts = %v, want [Hello]", texts)
+	}
+}
+
+func TestChat_ResponsesStreamIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	model := Chat(
+		"gpt-5",
+		WithAPIKey("test-key"),
+		WithEndpoint(server.URL),
+		WithResponsesStreamIdleTimeout(25*time.Millisecond),
+	)
+	result, err := model.DoStream(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var streamErr error
+	for chunk := range result.Stream {
+		if chunk.Type == provider.ChunkError {
+			streamErr = chunk.Error
+		}
+	}
+	var idleErr *openai.StreamIdleTimeoutError
+	if !errors.As(streamErr, &idleErr) || idleErr.Idle != 25*time.Millisecond {
+		t.Fatalf("stream error = %T %v, want Azure-forwarded idle timeout", streamErr, streamErr)
+	}
+}
+
+func TestChat_ResponsesStreamDoneCompatibility(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	model := Chat(
+		"gpt-5",
+		WithAPIKey("test-key"),
+		WithEndpoint(server.URL),
+		WithResponsesStreamDoneCompatibility(true),
+	)
+	result, err := model.DoStream(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotFinish bool
+	for chunk := range result.Stream {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+	}
+	if !gotFinish {
+		t.Fatal("Azure [DONE] compatibility option did not finish the stream")
 	}
 }
 
@@ -1196,8 +1270,8 @@ func TestAIServices_TokenSourceError(t *testing.T) {
 func TestForceChatCompletions_PreservesExistingOptions(t *testing.T) {
 	params := provider.GenerateParams{
 		ProviderOptions: map[string]any{
-			"user":       "test-user",
-			"customKey":  42,
+			"user":      "test-user",
+			"customKey": 42,
 		},
 	}
 	forceChatCompletions(&params)

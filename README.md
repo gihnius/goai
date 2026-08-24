@@ -135,6 +135,14 @@ fmt.Printf("\nTokens: %d in, %d out\n",
 	result.TotalUsage.InputTokens, result.TotalUsage.OutputTokens)
 ```
 
+OpenAI Responses streams enforce a five-minute provider-event idle timeout.
+Configure this per model with `openai.WithResponsesStreamIdleTimeout`; pass `0`
+to explicitly disable the watchdog. Premature EOF and a bare `[DONE]` sentinel
+are rejected by default. Non-standard endpoints that require `[DONE]` can opt
+in explicitly with `openai.WithResponsesStreamDoneCompatibility(true)`. Idle
+and protocol interruptions are exposed as typed
+`openai.StreamIdleTimeoutError` and `openai.StreamProtocolError` values.
+
 Streaming with tools:
 
 ```go

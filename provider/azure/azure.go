@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/zendev-sh/goai/provider"
 	"github.com/zendev-sh/goai/provider/anthropic"
@@ -39,13 +40,15 @@ const defaultAPIVersion = "2025-03-01-preview"
 type Option func(*options)
 
 type options struct {
-	apiKey                 string
-	tokenSource            provider.TokenSource
-	endpoint               string
-	headers                map[string]string
-	httpClient             *http.Client
-	apiVersion             string
-	useDeploymentBasedURLs bool
+	apiKey                     string
+	tokenSource                provider.TokenSource
+	endpoint                   string
+	headers                    map[string]string
+	httpClient                 *http.Client
+	apiVersion                 string
+	useDeploymentBasedURLs     bool
+	responsesStreamIdleTimeout time.Duration
+	responsesStreamAllowDone   bool
 }
 
 // WithAPIKey sets the Azure API key.
@@ -80,6 +83,25 @@ func WithHeaders(h map[string]string) Option {
 func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) {
 		o.httpClient = c
+	}
+}
+
+// WithResponsesStreamIdleTimeout configures the event-level idle timeout for
+// Azure OpenAI Responses streams. A positive duration enables the watchdog,
+// zero disables it, and a negative duration is rejected when a Responses
+// stream starts. The default matches [openai.DefaultResponsesStreamIdleTimeout].
+func WithResponsesStreamIdleTimeout(timeout time.Duration) Option {
+	return func(o *options) {
+		o.responsesStreamIdleTimeout = timeout
+	}
+}
+
+// WithResponsesStreamDoneCompatibility allows a non-standard Azure OpenAI
+// Responses endpoint to terminate a stream with a bare [DONE] sentinel. It is
+// disabled by default; standard Responses streams use typed terminal events.
+func WithResponsesStreamDoneCompatibility(enabled bool) Option {
+	return func(o *options) {
+		o.responsesStreamAllowDone = enabled
 	}
 }
 
@@ -176,7 +198,7 @@ func buildHTTPClient(o *options, modelID string) *http.Client {
 // Claude via a separate API that speaks the Anthropic Messages protocol, not
 // OpenAI Chat Completions.
 func Chat(modelID string, opts ...Option) provider.LanguageModel {
-	o := options{}
+	o := options{responsesStreamIdleTimeout: openai.DefaultResponsesStreamIdleTimeout}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -210,6 +232,8 @@ func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	openaiOpts := []openai.Option{
 		openai.WithHTTPClient(httpClient),
 		openai.WithAPIKey("azure-delegated"),
+		openai.WithResponsesStreamIdleTimeout(o.responsesStreamIdleTimeout),
+		openai.WithResponsesStreamDoneCompatibility(o.responsesStreamAllowDone),
 		// Use a placeholder base URL -- azureRoundTripper rewrites it.
 		openai.WithBaseURL("https://azure-placeholder"),
 	}
@@ -397,7 +421,14 @@ func buildCognitiveServicesModel(o *options, modelID string) provider.LanguageMo
 	httpClient := &http.Client{Transport: transport}
 
 	// openai.Chat defaults to Responses API which is what codex/pro models need.
-	return openai.Chat(modelID, openai.WithHTTPClient(httpClient), openai.WithAPIKey("azure-delegated"), openai.WithBaseURL(baseURL))
+	return openai.Chat(
+		modelID,
+		openai.WithHTTPClient(httpClient),
+		openai.WithAPIKey("azure-delegated"),
+		openai.WithBaseURL(baseURL),
+		openai.WithResponsesStreamIdleTimeout(o.responsesStreamIdleTimeout),
+		openai.WithResponsesStreamDoneCompatibility(o.responsesStreamAllowDone),
+	)
 }
 
 // aiServicesRoundTripper injects Azure auth headers and api-version query parameter
