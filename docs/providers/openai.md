@@ -173,7 +173,7 @@ result, err := goai.GenerateText(ctx, model,
 | `WithHeaders(h)` | `map[string]string` | Additional HTTP headers on every request. |
 | `WithHTTPClient(c)` | `*http.Client` | Custom HTTP client for proxies, logging, URL rewriting. |
 | `WithResponsesStreamIdleTimeout(d)` | `time.Duration` | Maximum wait for a complete Responses stream event. Default: `5m`; `0` disables the watchdog. |
-| `WithResponsesStreamDoneCompatibility(b)` | `bool` | Allow a non-standard Responses endpoint to terminate with bare `[DONE]`. Default: `false`. |
+| `WithResponsesStreamDoneCompatibility(b)` | `bool` | Allow only a non-standard bare `[DONE]` terminal sentinel; event schema validation remains strict. Default: `false`. |
 
 ### Responses Stream Reliability
 
@@ -187,7 +187,9 @@ model := openai.Chat("gpt-5",
 
 Pass `0` only when an endpoint intentionally permits unlimited idle time. Negative durations are rejected when a Responses stream is started. The option does not affect non-streaming calls or Chat Completions.
 
-Responses streams derive the event type from the JSON payload and fall back to the SSE `event:` field when the payload omits `type`, so standard data-only SSE and event-typed streams are both accepted. When both types are present they must agree. Streams must end with `response.completed`, `response.incomplete`, `response.failed`, or a top-level `error` event. EOF or a bare `[DONE]` before one of those terminal events is a protocol error; completed and incomplete responses return immediately without waiting for the connection to close. For a non-standard endpoint that only emits `[DONE]`, explicitly opt in with `openai.WithResponsesStreamDoneCompatibility(true)`.
+Responses streams derive the event type from the JSON payload and fall back to the SSE `event:` field when the payload omits `type`, so standard data-only SSE and event-typed streams are both accepted. When both types are present they must agree. A JSON data frame with neither type is not a valid keepalive; endpoints should use SSE comments for keepalives. Once an event type is recognized, malformed JSON, wrong field types, and missing or null fields required to project that event terminate the stream with `StreamProtocolError` instead of silently dropping output.
+
+Streams must end with `response.completed`, `response.incomplete`, `response.failed`, or a top-level `error` event. EOF or a bare `[DONE]` before one of those terminal events is a protocol error; completed and incomplete responses return immediately without waiting for the connection to close. For a non-standard endpoint that only emits `[DONE]`, explicitly opt in with `openai.WithResponsesStreamDoneCompatibility(true)`. That option changes only terminal-sentinel handling; it does not relax event typing or schema validation.
 
 Terminal usage is captured when provided. For compatibility with existing gateways, a completed or incomplete response that omits `usage` finishes with zero usage; when a `usage` object is present, both `input_tokens` and `output_tokens` are required.
 

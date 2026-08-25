@@ -488,6 +488,270 @@ func TestResponsesStreamRejectsMalformedNonterminalEvent(t *testing.T) {
 	drainChunks(t, out)
 }
 
+func TestResponsesStreamRejectsUntypedDataOnlyEvent(t *testing.T) {
+	for _, data := range []string{`{}`, `null`} {
+		t.Run(data, func(t *testing.T) {
+			reader, writer := io.Pipe()
+			t.Cleanup(func() {
+				_ = reader.Close()
+				_ = writer.Close()
+			})
+
+			out := make(chan provider.StreamChunk, 4)
+			go streamResponsesWithConfig(t.Context(), reader, out, responsesStreamConfig{
+				idleTimeout: 100 * time.Millisecond,
+			})
+			if _, err := io.WriteString(writer, "data: "+data+"\n\n"); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+
+			chunk := receiveChunk(t, out)
+			var protocolErr *StreamProtocolError
+			if chunk.Type != provider.ChunkError || !errors.As(chunk.Error, &protocolErr) {
+				t.Fatalf("chunk = %#v, want protocol error", chunk)
+			}
+			if protocolErr.EventType != "" || protocolErr.Reason != "event is missing type" {
+				t.Fatalf("protocol error = %#v", protocolErr)
+			}
+			if isResponsesIdleTimeout(chunk.Error) {
+				t.Fatalf("untyped event incorrectly counted as stream activity: %v", chunk.Error)
+			}
+			drainChunks(t, out)
+		})
+	}
+}
+
+func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
+	tests := []struct {
+		name       string
+		eventType  string
+		data       string
+		dataOnly   bool
+		wantReason string
+	}{
+		{
+			name:      "text delta",
+			eventType: "response.output_text.delta",
+			data:      `{"type":"response.output_text.delta","delta":123}`,
+			dataOnly:  true,
+		},
+		{
+			name:      "refusal delta",
+			eventType: "response.refusal.delta",
+			data:      `{"delta":123}`,
+		},
+		{
+			name:      "reasoning summary delta",
+			eventType: "response.reasoning_summary_text.delta",
+			data:      `{"summary_index":"first"}`,
+		},
+		{
+			name:      "output item added",
+			eventType: "response.output_item.added",
+			data:      `{"output_index":"first","item":{"type":"function_call"}}`,
+		},
+		{
+			name:      "tool call delta",
+			eventType: "response.function_call_arguments.delta",
+			data:      `{"type":"response.function_call_arguments.delta","output_index":0,"delta":123}`,
+		},
+		{
+			name:      "tool call done",
+			eventType: "response.function_call_arguments.done",
+			data:      `{"output_index":"first"}`,
+		},
+		{
+			name:      "output item done envelope",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":"first","item":{"type":"message"}}`,
+		},
+		{
+			name:      "output item done item",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":123}`,
+		},
+		{
+			name:      "output item done item type",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":{"type":123}}`,
+		},
+		{
+			name:      "reasoning item",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":{"type":"reasoning","encrypted_content":123}}`,
+		},
+		{
+			name:       "text delta missing",
+			eventType:  "response.output_text.delta",
+			data:       `{}`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "text event null payload",
+			eventType:  "response.output_text.delta",
+			data:       `null`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "refusal delta null",
+			eventType:  "response.refusal.delta",
+			data:       `{"delta":null}`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "reasoning item id null",
+			eventType:  "response.reasoning_summary_text.delta",
+			data:       `{"item_id":null,"summary_index":0,"delta":"thinking"}`,
+			wantReason: "event payload has null item_id",
+		},
+		{
+			name:       "reasoning summary index null",
+			eventType:  "response.reasoning_summary_text.delta",
+			data:       `{"item_id":"rs_1","summary_index":null,"delta":"thinking"}`,
+			wantReason: "event payload has null summary_index",
+		},
+		{
+			name:       "reasoning delta null",
+			eventType:  "response.reasoning_summary_text.delta",
+			data:       `{"item_id":"rs_1","summary_index":0,"delta":null}`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "output item added index null",
+			eventType:  "response.output_item.added",
+			data:       `{"output_index":null,"item":{"type":"function_call"}}`,
+			wantReason: "event payload has null output_index",
+		},
+		{
+			name:       "output item added item null",
+			eventType:  "response.output_item.added",
+			data:       `{"output_index":0,"item":null}`,
+			wantReason: "event payload is missing required item",
+		},
+		{
+			name:       "output item added type null",
+			eventType:  "response.output_item.added",
+			data:       `{"output_index":0,"item":{"type":null}}`,
+			wantReason: "event payload is missing required item.type",
+		},
+		{
+			name:       "tool call delta index null",
+			eventType:  "response.function_call_arguments.delta",
+			data:       `{"output_index":null,"delta":"{"}`,
+			wantReason: "event payload has null output_index",
+		},
+		{
+			name:       "tool call delta null",
+			eventType:  "response.function_call_arguments.delta",
+			data:       `{"output_index":0,"delta":null}`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "tool call done index null",
+			eventType:  "response.function_call_arguments.done",
+			data:       `{"output_index":null}`,
+			wantReason: "event payload has null output_index",
+		},
+		{
+			name:       "output item done index null",
+			eventType:  "response.output_item.done",
+			data:       `{"output_index":null}`,
+			wantReason: "event payload has null output_index",
+		},
+		{
+			name:       "output item done item null",
+			eventType:  "response.output_item.done",
+			data:       `{"output_index":0,"item":null}`,
+			wantReason: "event payload has null item",
+		},
+		{
+			name:       "output item done type null",
+			eventType:  "response.output_item.done",
+			data:       `{"output_index":0,"item":{"type":null}}`,
+			wantReason: "event payload is missing required item.type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := sseLine(tt.eventType, tt.data)
+			if tt.dataOnly {
+				input = "data: " + tt.data + "\n\n"
+			}
+			input += completedResponsesEvent
+
+			out := make(chan provider.StreamChunk, 4)
+			streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+			chunk := receiveChunk(t, out)
+			var protocolErr *StreamProtocolError
+			if chunk.Type != provider.ChunkError || !errors.As(chunk.Error, &protocolErr) {
+				t.Fatalf("chunk = %#v, want protocol error", chunk)
+			}
+			wantReason := tt.wantReason
+			if wantReason == "" {
+				wantReason = "event payload does not match event schema"
+			}
+			if protocolErr.EventType != tt.eventType || protocolErr.Reason != wantReason {
+				t.Fatalf("protocol error = %#v", protocolErr)
+			}
+			if tt.wantReason == "" && errors.Unwrap(protocolErr) == nil {
+				t.Fatalf("protocol error does not preserve decoding cause: %#v", protocolErr)
+			}
+			drainChunks(t, out)
+		})
+	}
+}
+
+func TestResponsesStreamPreservesOptionalFieldCompatibility(t *testing.T) {
+	input := sseLine("response.output_text.delta", `{"delta":""}`) +
+		sseLine("response.reasoning_summary_text.delta", `{"delta":""}`) +
+		sseLine("response.function_call_arguments.delta", `{"delta":""}`) +
+		completedResponsesEvent
+	out := make(chan provider.StreamChunk, 8)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+	var gotFinish bool
+	for chunk := range out {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+	}
+	if !gotFinish {
+		t.Fatal("stream did not finish after present empty delta fields")
+	}
+}
+
+func TestResponsesStreamPreservesReasoningItemFallbacks(t *testing.T) {
+	input := sseLine("response.output_item.added", `{"output_index":0,"item":{"type":"reasoning"}}`) +
+		sseLine("response.output_item.done", `{"output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted"}}`) +
+		completedResponsesEvent
+	out := make(chan provider.StreamChunk, 8)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+	var reasoning *provider.StreamChunk
+	for chunk := range out {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		if chunk.Type == provider.ChunkReasoning {
+			copy := chunk
+			reasoning = &copy
+		}
+	}
+	if reasoning == nil {
+		t.Fatal("missing encrypted reasoning chunk")
+	}
+	if got := reasoning.Metadata["reasoningId"]; got != "rs_1:0" {
+		t.Fatalf("reasoningId = %#v, want rs_1:0", got)
+	}
+	openai, ok := reasoning.Metadata["openai"].(map[string]any)
+	if !ok || openai["itemId"] != "rs_1" || openai["encryptedContent"] != "encrypted" {
+		t.Fatalf("openai reasoning metadata = %#v", reasoning.Metadata["openai"])
+	}
+}
+
 func TestResponsesStreamRejectsUnterminatedTerminalEvent(t *testing.T) {
 	input := "event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}"
 	out := make(chan provider.StreamChunk, 4)

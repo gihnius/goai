@@ -609,47 +609,83 @@ func streamResponsesWithConfig(
 		switch eventType {
 		case "response.output_text.delta":
 			var ev struct {
-				Delta string `json:"delta"`
+				Delta *string `json:"delta"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
-				if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkText, Text: ev.Delta}) {
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.Delta == nil {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "delta"))
+				return
+			}
+			if *ev.Delta != "" {
+				if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkText, Text: *ev.Delta}) {
 					return
 				}
 			}
 
 		case "response.refusal.delta":
 			var ev struct {
-				Delta string `json:"delta"`
+				Delta *string `json:"delta"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
-				if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkText, Text: ev.Delta}) {
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.Delta == nil {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "delta"))
+				return
+			}
+			if *ev.Delta != "" {
+				if !provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkText, Text: *ev.Delta}) {
 					return
 				}
 			}
 
 		case "response.reasoning_summary_text.delta":
 			var ev struct {
-				ItemID       string `json:"item_id"`
-				SummaryIndex int    `json:"summary_index"`
-				Delta        string `json:"delta"`
+				ItemID       *string `json:"item_id"`
+				SummaryIndex *int    `json:"summary_index"`
+				Delta        *string `json:"delta"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
+			// Preseeding keeps omitted legacy fields at their zero values while
+			// still letting json.Unmarshal expose an explicit null as nil.
+			ev.ItemID = new(string)
+			ev.SummaryIndex = new(int)
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.ItemID == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "item_id"))
+				return
+			}
+			if ev.SummaryIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "summary_index"))
+				return
+			}
+			if ev.Delta == nil {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "delta"))
+				return
+			}
+			if *ev.Delta != "" {
 				// Use canonical ID from activeReasoning if available.
-				id, text := ev.ItemID, ev.Delta
-				if idx, ar := activeReasoningForEvent(activeReasoning, currentReasoningIdx, ev.ItemID); idx >= 0 {
+				id, text := *ev.ItemID, *ev.Delta
+				if idx, ar := activeReasoningForEvent(activeReasoning, currentReasoningIdx, *ev.ItemID); idx >= 0 {
 					id = ar.canonicalID
 					// A new summary_index opens a separate summary: carry the
 					// boundary in the text, since the deltas never bring it.
-					if ar.lastSummary >= 0 && ev.SummaryIndex != ar.lastSummary {
+					if ar.lastSummary >= 0 && *ev.SummaryIndex != ar.lastSummary {
 						text = summarySeparator + text
 					}
-					ar.lastSummary = ev.SummaryIndex
+					ar.lastSummary = *ev.SummaryIndex
 				}
 				if !provider.TrySend(ctx, out, provider.StreamChunk{
 					Type: provider.ChunkReasoning,
 					Text: text,
 					Metadata: map[string]any{
-						"reasoningId": fmt.Sprintf("%s:%d", id, ev.SummaryIndex),
+						"reasoningId": fmt.Sprintf("%s:%d", id, *ev.SummaryIndex),
 					},
 				}) {
 					return
@@ -662,56 +698,84 @@ func streamResponsesWithConfig(
 
 		case "response.output_item.added":
 			var ev struct {
-				OutputIndex int `json:"output_index"`
-				Item        struct {
-					Type   string `json:"type"`
-					ID     string `json:"id"`
-					CallID string `json:"call_id"`
-					Name   string `json:"name"`
+				OutputIndex *int `json:"output_index"`
+				Item        *struct {
+					Type   *string `json:"type"`
+					ID     string  `json:"id"`
+					CallID string  `json:"call_id"`
+					Name   string  `json:"name"`
 				} `json:"item"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				switch ev.Item.Type {
-				case "function_call":
-					hasFunctionCall = true
-					activeTools[ev.OutputIndex] = &responsesToolCall{
-						id:   ev.Item.CallID,
-						name: ev.Item.Name,
-					}
-					if !provider.TrySend(ctx, out, provider.StreamChunk{
-						Type:       provider.ChunkToolCallStreamStart,
-						ToolCallID: ev.Item.CallID,
-						ToolName:   ev.Item.Name,
-					}) {
-						return
-					}
-				case "reasoning":
-					activeReasoning[ev.OutputIndex] = &responsesReasoning{
-						canonicalID: ev.Item.ID,
-						lastSummary: -1,
-					}
-					currentReasoningIdx = ev.OutputIndex
+			ev.OutputIndex = new(int)
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.OutputIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "output_index"))
+				return
+			}
+			if ev.Item == nil {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "item"))
+				return
+			}
+			if ev.Item.Type == nil || *ev.Item.Type == "" {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "item.type"))
+				return
+			}
+			switch *ev.Item.Type {
+			case "function_call":
+				hasFunctionCall = true
+				activeTools[*ev.OutputIndex] = &responsesToolCall{
+					id:   ev.Item.CallID,
+					name: ev.Item.Name,
 				}
+				if !provider.TrySend(ctx, out, provider.StreamChunk{
+					Type:       provider.ChunkToolCallStreamStart,
+					ToolCallID: ev.Item.CallID,
+					ToolName:   ev.Item.Name,
+				}) {
+					return
+				}
+			case "reasoning":
+				activeReasoning[*ev.OutputIndex] = &responsesReasoning{
+					canonicalID: ev.Item.ID,
+					lastSummary: -1,
+				}
+				currentReasoningIdx = *ev.OutputIndex
 			}
 
 		case "response.function_call_arguments.delta":
 			var ev struct {
-				OutputIndex int    `json:"output_index"`
-				Delta       string `json:"delta"`
+				OutputIndex *int    `json:"output_index"`
+				Delta       *string `json:"delta"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
-				active := activeTools[ev.OutputIndex]
+			ev.OutputIndex = new(int)
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.OutputIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "output_index"))
+				return
+			}
+			if ev.Delta == nil {
+				trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "delta"))
+				return
+			}
+			if *ev.Delta != "" {
+				active := activeTools[*ev.OutputIndex]
 				if active == nil {
 					active = &responsesToolCall{}
-					activeTools[ev.OutputIndex] = active
+					activeTools[*ev.OutputIndex] = active
 				}
-				active.args.WriteString(ev.Delta)
+				active.args.WriteString(*ev.Delta)
 
 				if !provider.TrySend(ctx, out, provider.StreamChunk{
 					Type:       provider.ChunkToolCallDelta,
 					ToolCallID: active.id,
 					ToolName:   active.name,
-					ToolInput:  ev.Delta,
+					ToolInput:  *ev.Delta,
 				}) {
 					return
 				}
@@ -723,10 +787,131 @@ func streamResponsesWithConfig(
 
 		case "response.function_call_arguments.done":
 			var ev struct {
-				OutputIndex int `json:"output_index"`
+				OutputIndex *int `json:"output_index"`
 			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				if active := activeTools[ev.OutputIndex]; active != nil {
+			ev.OutputIndex = new(int)
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.OutputIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "output_index"))
+				return
+			}
+			if active := activeTools[*ev.OutputIndex]; active != nil {
+				if remaining := active.args.String(); remaining != "" {
+					if !provider.TrySend(ctx, out, provider.StreamChunk{
+						Type:       provider.ChunkToolCall,
+						ToolCallID: active.id,
+						ToolName:   active.name,
+						ToolInput:  remaining,
+					}) {
+						return
+					}
+					active.args.Reset()
+				}
+			}
+
+		case "response.output_item.done":
+			var ev struct {
+				OutputIndex *int            `json:"output_index"`
+				Item        json.RawMessage `json:"item"`
+			}
+			ev.OutputIndex = new(int)
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.OutputIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "output_index"))
+				return
+			}
+			var itemHead *struct {
+				Type *string `json:"type"`
+			}
+			if len(ev.Item) > 0 {
+				if err := decodeResponsesEvent(eventType, ev.Item, &itemHead); err != nil {
+					trySendResponsesError(ctx, out, err)
+					return
+				}
+				if itemHead == nil {
+					trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "event payload has null item", nil))
+					return
+				}
+				if itemHead.Type == nil || *itemHead.Type == "" {
+					trySendResponsesError(ctx, out, missingResponsesEventField(eventType, "item.type"))
+					return
+				}
+			}
+			itemType := ""
+			if itemHead != nil {
+				itemType = *itemHead.Type
+			}
+			switch itemType {
+			case "reasoning":
+				var item struct {
+					ID               string `json:"id"`
+					EncryptedContent string `json:"encrypted_content"`
+				}
+				if err := decodeResponsesEvent(eventType, ev.Item, &item); err != nil {
+					trySendResponsesError(ctx, out, err)
+					return
+				}
+				if active := activeReasoning[*ev.OutputIndex]; active != nil && item.EncryptedContent != "" {
+					id := active.canonicalID
+					if id == "" {
+						id = item.ID
+					}
+					index := active.lastSummary
+					if index < 0 {
+						index = 0
+					}
+					if !provider.TrySend(ctx, out, provider.StreamChunk{
+						Type: provider.ChunkReasoning,
+						Metadata: map[string]any{
+							"reasoningId": fmt.Sprintf("%s:%d", id, index),
+							"openai": map[string]any{
+								"itemId":           id,
+								"encryptedContent": item.EncryptedContent,
+							},
+						},
+					}) {
+						return
+					}
+				}
+				delete(activeReasoning, *ev.OutputIndex)
+				if currentReasoningIdx == *ev.OutputIndex {
+					currentReasoningIdx = -1
+				}
+			default:
+				if isServerExecutedItem(itemType) {
+					// Capture the full server-executed item payload and
+					// emit a ChunkToolCall so it round-trips into the
+					// assistant turn via ToolCall.Metadata.
+					var rawItem map[string]any
+					if err := decodeResponsesEvent(eventType, ev.Item, &rawItem); err != nil {
+						trySendResponsesError(ctx, out, err)
+						return
+					}
+					id, _ := rawItem["id"].(string)
+					name, _ := rawItem["name"].(string)
+					if name == "" {
+						name = itemType
+					}
+					if !provider.TrySend(ctx, out, provider.StreamChunk{
+						Type:       provider.ChunkToolCall,
+						ToolCallID: id,
+						ToolName:   name,
+						Metadata: map[string]any{
+							"providerExecuted": true,
+							"rawItem":          rawItem,
+						},
+					}) {
+						return
+					}
+				} else if active := activeTools[*ev.OutputIndex]; active != nil {
+					// Safety net for an item closed without its arguments.done.
+					// The normal path resets the buffer, so this stays empty.
 					if remaining := active.args.String(); remaining != "" {
 						if !provider.TrySend(ctx, out, provider.StreamChunk{
 							Type:       provider.ChunkToolCall,
@@ -739,92 +924,7 @@ func streamResponsesWithConfig(
 						active.args.Reset()
 					}
 				}
-			}
-
-		case "response.output_item.done":
-			var ev struct {
-				OutputIndex int             `json:"output_index"`
-				Item        json.RawMessage `json:"item"`
-			}
-			if json.Unmarshal([]byte(data), &ev) == nil {
-				var itemHead struct {
-					Type string `json:"type"`
-				}
-				_ = json.Unmarshal(ev.Item, &itemHead)
-				switch itemHead.Type {
-				case "reasoning":
-					var item struct {
-						ID               string `json:"id"`
-						EncryptedContent string `json:"encrypted_content"`
-					}
-					_ = json.Unmarshal(ev.Item, &item)
-					if active := activeReasoning[ev.OutputIndex]; active != nil && item.EncryptedContent != "" {
-						id := active.canonicalID
-						if id == "" {
-							id = item.ID
-						}
-						index := active.lastSummary
-						if index < 0 {
-							index = 0
-						}
-						if !provider.TrySend(ctx, out, provider.StreamChunk{
-							Type: provider.ChunkReasoning,
-							Metadata: map[string]any{
-								"reasoningId": fmt.Sprintf("%s:%d", id, index),
-								"openai": map[string]any{
-									"itemId":           id,
-									"encryptedContent": item.EncryptedContent,
-								},
-							},
-						}) {
-							return
-						}
-					}
-					delete(activeReasoning, ev.OutputIndex)
-					if currentReasoningIdx == ev.OutputIndex {
-						currentReasoningIdx = -1
-					}
-				default:
-					if isServerExecutedItem(itemHead.Type) {
-						// Capture the full server-executed item payload and
-						// emit a ChunkToolCall so it round-trips into the
-						// assistant turn via ToolCall.Metadata.
-						var raw map[string]any
-						if err := json.Unmarshal(ev.Item, &raw); err == nil {
-							id, _ := raw["id"].(string)
-							name, _ := raw["name"].(string)
-							if name == "" {
-								name = itemHead.Type
-							}
-							if !provider.TrySend(ctx, out, provider.StreamChunk{
-								Type:       provider.ChunkToolCall,
-								ToolCallID: id,
-								ToolName:   name,
-								Metadata: map[string]any{
-									"providerExecuted": true,
-									"rawItem":          raw,
-								},
-							}) {
-								return
-							}
-						}
-					} else if active := activeTools[ev.OutputIndex]; active != nil {
-						// Safety net for an item closed without its arguments.done.
-						// The normal path resets the buffer, so this stays empty.
-						if remaining := active.args.String(); remaining != "" {
-							if !provider.TrySend(ctx, out, provider.StreamChunk{
-								Type:       provider.ChunkToolCall,
-								ToolCallID: active.id,
-								ToolName:   active.name,
-								ToolInput:  remaining,
-							}) {
-								return
-							}
-							active.args.Reset()
-						}
-					}
-					delete(activeTools, ev.OutputIndex)
-				}
+				delete(activeTools, *ev.OutputIndex)
 			}
 
 		case "response.completed", "response.incomplete":

@@ -139,8 +139,12 @@ OpenAI Responses streams enforce a five-minute provider-event idle timeout.
 Configure this per model with `openai.WithResponsesStreamIdleTimeout`; pass `0`
 to explicitly disable the watchdog. Premature EOF and a bare `[DONE]` sentinel
 are rejected by default. Non-standard endpoints that require `[DONE]` can opt
-in explicitly with `openai.WithResponsesStreamDoneCompatibility(true)`. Idle
-and protocol interruptions are exposed as typed
+in explicitly with `openai.WithResponsesStreamDoneCompatibility(true)`; this
+option changes only terminal-sentinel handling and does not relax event schema
+validation. Every JSON data event must identify its type through either the JSON
+`type` property or the SSE `event:` field, and malformed recognized events
+terminate the stream. Endpoints should use SSE comments, not untyped data
+frames, for keepalives. Idle and protocol interruptions are exposed as typed
 `openai.StreamIdleTimeoutError` and `openai.StreamProtocolError` values.
 
 Streaming with tools:

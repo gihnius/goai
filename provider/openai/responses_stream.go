@@ -222,7 +222,25 @@ func responsesEventType(event sse.Event) (string, error) {
 	if event.Type != "" {
 		return event.Type, nil
 	}
+	if envelope.Type == "" {
+		return "", newStreamProtocolError("", "event is missing type", nil)
+	}
 	return envelope.Type, nil
+}
+
+func decodeResponsesEvent(eventType string, data []byte, target any) error {
+	if err := json.Unmarshal(data, target); err != nil {
+		return newStreamProtocolError(eventType, "event payload does not match event schema", err)
+	}
+	return nil
+}
+
+func missingResponsesEventField(eventType, field string) error {
+	return newStreamProtocolError(eventType, fmt.Sprintf("event payload is missing required %s", field), nil)
+}
+
+func nullResponsesEventField(eventType, field string) error {
+	return newStreamProtocolError(eventType, fmt.Sprintf("event payload has null %s", field), nil)
 }
 
 func trySendResponsesError(ctx context.Context, out chan<- provider.StreamChunk, err error) bool {
