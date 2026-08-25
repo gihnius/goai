@@ -694,17 +694,45 @@ func streamResponsesWithConfig(
 
 		case "response.reasoning_summary_part.added":
 			var ev struct {
-				ItemID         string `json:"item_id"`
-				OutputIndex    int    `json:"output_index"`
-				SummaryIndex   int    `json:"summary_index"`
-				SequenceNumber int    `json:"sequence_number"`
+				ItemID         *string `json:"item_id"`
+				OutputIndex    *int    `json:"output_index"`
+				SummaryIndex   *int    `json:"summary_index"`
+				SequenceNumber *int    `json:"sequence_number"`
 				Part           *struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"part"`
 			}
+			ev.ItemID = new(string)
+			ev.OutputIndex = new(int)
+			ev.SummaryIndex = new(int)
+			ev.SequenceNumber = new(int)
+			ev.Part = &struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{}
 			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
 				trySendResponsesError(ctx, out, err)
+				return
+			}
+			if ev.ItemID == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "item_id"))
+				return
+			}
+			if ev.OutputIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "output_index"))
+				return
+			}
+			if ev.SummaryIndex == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "summary_index"))
+				return
+			}
+			if ev.SequenceNumber == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "sequence_number"))
+				return
+			}
+			if ev.Part == nil {
+				trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "part"))
 				return
 			}
 			// New summary segments do not emit chunks, but decoding validates the
@@ -903,11 +931,21 @@ func streamResponsesWithConfig(
 					// emit a ChunkToolCall so it round-trips into the
 					// assistant turn via ToolCall.Metadata.
 					var itemIdentity struct {
-						ID   string `json:"id"`
-						Name string `json:"name"`
+						ID   *string `json:"id"`
+						Name *string `json:"name"`
 					}
+					itemIdentity.ID = new(string)
+					itemIdentity.Name = new(string)
 					if err := decodeResponsesEvent(eventType, ev.Item, &itemIdentity); err != nil {
 						trySendResponsesError(ctx, out, err)
+						return
+					}
+					if itemIdentity.ID == nil {
+						trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "item.id"))
+						return
+					}
+					if itemIdentity.Name == nil {
+						trySendResponsesError(ctx, out, nullResponsesEventField(eventType, "item.name"))
 						return
 					}
 					var rawItem map[string]any
@@ -915,8 +953,8 @@ func streamResponsesWithConfig(
 						trySendResponsesError(ctx, out, err)
 						return
 					}
-					id := itemIdentity.ID
-					name := itemIdentity.Name
+					id := *itemIdentity.ID
+					name := *itemIdentity.Name
 					if name == "" {
 						name = itemType
 					}

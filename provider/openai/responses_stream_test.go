@@ -601,6 +601,48 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			data:      `{"output_index":0,"item":{"type":"web_search_call","name":true}}`,
 		},
 		{
+			name:       "reasoning part item id null",
+			eventType:  "response.reasoning_summary_part.added",
+			data:       `{"item_id":null,"output_index":0,"summary_index":0,"sequence_number":0,"part":{}}`,
+			wantReason: "event payload has null item_id",
+		},
+		{
+			name:       "reasoning part output index null",
+			eventType:  "response.reasoning_summary_part.added",
+			data:       `{"item_id":"rs_1","output_index":null,"summary_index":0,"sequence_number":0,"part":{}}`,
+			wantReason: "event payload has null output_index",
+		},
+		{
+			name:       "reasoning part summary index null",
+			eventType:  "response.reasoning_summary_part.added",
+			data:       `{"item_id":"rs_1","output_index":0,"summary_index":null,"sequence_number":0,"part":{}}`,
+			wantReason: "event payload has null summary_index",
+		},
+		{
+			name:       "reasoning part sequence number null",
+			eventType:  "response.reasoning_summary_part.added",
+			data:       `{"item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":null,"part":{}}`,
+			wantReason: "event payload has null sequence_number",
+		},
+		{
+			name:       "reasoning part null",
+			eventType:  "response.reasoning_summary_part.added",
+			data:       `{"item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":0,"part":null}`,
+			wantReason: "event payload has null part",
+		},
+		{
+			name:       "server-executed item id null",
+			eventType:  "response.output_item.done",
+			data:       `{"output_index":0,"item":{"type":"web_search_call","id":null}}`,
+			wantReason: "event payload has null item.id",
+		},
+		{
+			name:       "server-executed item name null",
+			eventType:  "response.output_item.done",
+			data:       `{"output_index":0,"item":{"type":"web_search_call","name":null}}`,
+			wantReason: "event payload has null item.name",
+		},
+		{
 			name:       "text delta missing",
 			eventType:  "response.output_text.delta",
 			data:       `{}`,
@@ -726,7 +768,9 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 func TestResponsesStreamPreservesOptionalFieldCompatibility(t *testing.T) {
 	input := sseLine("response.output_text.delta", `{"delta":""}`) +
 		sseLine("response.reasoning_summary_text.delta", `{"delta":""}`) +
+		sseLine("response.reasoning_summary_part.added", `{}`) +
 		sseLine("response.function_call_arguments.delta", `{"delta":""}`) +
+		sseLine("response.output_item.done", `{"item":{"type":"web_search_call"}}`) +
 		completedResponsesEvent
 	out := make(chan provider.StreamChunk, 8)
 	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
