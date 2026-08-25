@@ -581,6 +581,11 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			data:      `{"output_index":0,"item":{"type":"reasoning","encrypted_content":123}}`,
 		},
 		{
+			name:      "server-executed item",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":{"type":"web_search_call","score":1e1000}}`,
+		},
+		{
 			name:       "text delta missing",
 			eventType:  "response.output_text.delta",
 			data:       `{}`,
