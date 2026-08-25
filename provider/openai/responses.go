@@ -693,8 +693,22 @@ func streamResponsesWithConfig(
 			}
 
 		case "response.reasoning_summary_part.added":
-			// New summary segment within same reasoning item -- no-op for chunk emission
-			// but tracked for canonical ID resolution.
+			var ev struct {
+				ItemID         string `json:"item_id"`
+				OutputIndex    int    `json:"output_index"`
+				SummaryIndex   int    `json:"summary_index"`
+				SequenceNumber int    `json:"sequence_number"`
+				Part           *struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"part"`
+			}
+			if err := decodeResponsesEvent(eventType, read.event.Data, &ev); err != nil {
+				trySendResponsesError(ctx, out, err)
+				return
+			}
+			// New summary segments do not emit chunks, but decoding validates the
+			// recognized event before it counts as stream activity.
 
 		case "response.output_item.added":
 			var ev struct {
@@ -888,13 +902,21 @@ func streamResponsesWithConfig(
 					// Capture the full server-executed item payload and
 					// emit a ChunkToolCall so it round-trips into the
 					// assistant turn via ToolCall.Metadata.
+					var itemIdentity struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					}
+					if err := decodeResponsesEvent(eventType, ev.Item, &itemIdentity); err != nil {
+						trySendResponsesError(ctx, out, err)
+						return
+					}
 					var rawItem map[string]any
 					if err := decodeResponsesEvent(eventType, ev.Item, &rawItem); err != nil {
 						trySendResponsesError(ctx, out, err)
 						return
 					}
-					id, _ := rawItem["id"].(string)
-					name, _ := rawItem["name"].(string)
+					id := itemIdentity.ID
+					name := itemIdentity.Name
 					if name == "" {
 						name = itemType
 					}

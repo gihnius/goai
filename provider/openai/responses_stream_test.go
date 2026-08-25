@@ -546,6 +546,11 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			data:      `{"summary_index":"first"}`,
 		},
 		{
+			name:      "reasoning summary part added",
+			eventType: "response.reasoning_summary_part.added",
+			data:      `{"item_id":123,"output_index":0,"summary_index":0}`,
+		},
+		{
 			name:      "output item added",
 			eventType: "response.output_item.added",
 			data:      `{"output_index":"first","item":{"type":"function_call"}}`,
@@ -584,6 +589,16 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			name:      "server-executed item",
 			eventType: "response.output_item.done",
 			data:      `{"output_index":0,"item":{"type":"web_search_call","score":1e1000}}`,
+		},
+		{
+			name:      "server-executed item id",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":{"type":"web_search_call","id":123}}`,
+		},
+		{
+			name:      "server-executed item name",
+			eventType: "response.output_item.done",
+			data:      `{"output_index":0,"item":{"type":"web_search_call","name":true}}`,
 		},
 		{
 			name:       "text delta missing",
