@@ -2397,20 +2397,27 @@ func TestStreamResponses_ReasoningEncryptedContent(t *testing.T) {
 		"event: response.completed\n" +
 		`data: {"response":{"id":"resp-1","model":"o3"}}` + "\n\n"
 	out := make(chan provider.StreamChunk, 8)
-	streamResponses(context.Background(), io.NopCloser(strings.NewReader(sse)), out)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(sse)), out)
 
 	var chunks []provider.StreamChunk
 	for chunk := range out {
 		chunks = append(chunks, chunk)
 	}
-	var encrypted bool
+	var encrypted, gotFinish bool
 	for _, chunk := range chunks {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
 		if openAI, ok := chunk.Metadata["openai"].(map[string]any); ok && openAI["encryptedContent"] == "opaque-state" {
 			encrypted = true
 		}
 	}
 	if !encrypted {
 		t.Fatal("stream did not preserve encrypted reasoning content")
+	}
+	if !gotFinish {
+		t.Fatal("usage-less terminal event did not finish the stream")
 	}
 }
 
@@ -2531,14 +2538,48 @@ func TestStreamResponses_ContentFilterIncomplete(t *testing.T) {
 	}
 }
 
-func TestStreamResponses_DONE(t *testing.T) {
+func TestStreamResponses_DONERejectedByDefault(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
 
-	model := Chat("o3", WithAPIKey("key"), WithBaseURL(server.URL))
+	model := Chat("gpt-5", WithAPIKey("key"), WithBaseURL(server.URL))
+	result, err := model.DoStream(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotError error
+	for chunk := range result.Stream {
+		if chunk.Type == provider.ChunkError {
+			gotError = chunk.Error
+		}
+	}
+	var protocolErr *StreamProtocolError
+	if !errors.As(gotError, &protocolErr) {
+		t.Fatalf("error = %T %v, want strict Responses protocol error", gotError, gotError)
+	}
+}
+
+func TestStreamResponses_DONECompatibility(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	model := Chat(
+		"gpt-5",
+		WithAPIKey("key"),
+		WithBaseURL(server.URL),
+		WithResponsesStreamDoneCompatibility(true),
+	)
 	result, err := model.DoStream(t.Context(), provider.GenerateParams{
 		Messages: []provider.Message{
 			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
@@ -2550,12 +2591,87 @@ func TestStreamResponses_DONE(t *testing.T) {
 
 	var gotFinish bool
 	for chunk := range result.Stream {
-		if chunk.Type == provider.ChunkFinish {
-			gotFinish = true
-		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
 	}
 	if !gotFinish {
-		t.Error("expected finish chunk from [DONE]")
+		t.Fatal("compatibility option did not accept [DONE]")
+	}
+}
+
+func TestStreamResponses_PrematureEOF(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		wantReasoning bool
+	}{
+		{
+			name:  "before output",
+			input: "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\"}}\n\n",
+		},
+		{
+			name:          "after reasoning delta",
+			input:         "event: response.reasoning_summary_text.delta\ndata: {\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"thinking\"}\n\n",
+			wantReasoning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := make(chan provider.StreamChunk, 4)
+			streamResponses(t.Context(), io.NopCloser(strings.NewReader(tt.input)), out)
+
+			var gotReasoning, gotError bool
+			for chunk := range out {
+				gotReasoning = gotReasoning || chunk.Type == provider.ChunkReasoning
+				gotError = gotError || chunk.Type == provider.ChunkError
+			}
+			if gotReasoning != tt.wantReasoning {
+				t.Fatalf("reasoning chunk = %v, want %v", gotReasoning, tt.wantReasoning)
+			}
+			if !gotError {
+				t.Fatal("expected premature EOF to emit a stream error")
+			}
+		})
+	}
+}
+
+func TestStreamResponses_MalformedTerminal(t *testing.T) {
+	terminalEvents := []string{
+		"response.completed",
+		"response.incomplete",
+		"response.failed",
+		"error",
+	}
+
+	for _, eventType := range terminalEvents {
+		for _, payload := range []struct {
+			name string
+			data string
+		}{
+			{name: "invalid JSON", data: "{not-json}"},
+			{name: "invalid shape", data: `{"response":"invalid","error":"invalid"}`},
+			{name: "missing required fields", data: `{}`},
+		} {
+			t.Run(eventType+"/"+payload.name, func(t *testing.T) {
+				input := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, payload.data)
+				out := make(chan provider.StreamChunk, 4)
+				streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+				var gotError error
+				for chunk := range out {
+					if chunk.Type == provider.ChunkError {
+						gotError = chunk.Error
+					}
+				}
+				if gotError == nil {
+					t.Fatal("expected malformed terminal event to emit a stream error")
+				}
+				var protocolErr *StreamProtocolError
+				if !errors.As(gotError, &protocolErr) || protocolErr.EventType != eventType {
+					t.Fatalf("error = %T %#v, want protocol error for %q", gotError, gotError, eventType)
+				}
+			})
+		}
 	}
 }
 
@@ -2602,14 +2718,18 @@ func TestStreamResponses_ScannerError(t *testing.T) {
 	out := make(chan provider.StreamChunk, 64)
 	go streamResponses(t.Context(), &errorReader{}, out)
 
-	var gotError bool
+	var gotError error
 	for chunk := range out {
 		if chunk.Type == provider.ChunkError {
-			gotError = true
+			gotError = chunk.Error
 		}
 	}
-	if !gotError {
+	if gotError == nil {
 		t.Error("expected error chunk from scanner error")
+	}
+	var protocolErr *StreamProtocolError
+	if !errors.As(gotError, &protocolErr) || protocolErr.Reason != "stream read failed" || errors.Unwrap(protocolErr) == nil {
+		t.Fatalf("error = %T %#v, want wrapped stream protocol error", gotError, gotError)
 	}
 }
 

@@ -172,6 +172,41 @@ result, err := goai.GenerateText(ctx, model,
 | `WithBaseURL(url)` | `string` | Override base URL. Falls back to `OPENAI_BASE_URL` env var. |
 | `WithHeaders(h)` | `map[string]string` | Additional HTTP headers on every request. |
 | `WithHTTPClient(c)` | `*http.Client` | Custom HTTP client for proxies, logging, URL rewriting. |
+| `WithResponsesStreamIdleTimeout(d)` | `time.Duration` | Maximum wait for a complete Responses stream event. Default: `5m`; `0` disables the watchdog. |
+| `WithResponsesStreamDoneCompatibility(b)` | `bool` | Allow only a non-standard bare `[DONE]` terminal sentinel; event schema validation remains strict. Default: `false`. |
+
+### Responses Stream Reliability
+
+Responses API streams use a five-minute event-level idle timeout by default. The timer resets for every complete provider event, including lifecycle and unknown valid events that do not emit a GoAI chunk. SSE comments, empty framing lines, and partial event fragments do not reset it.
+
+```go
+model := openai.Chat("gpt-5",
+    openai.WithResponsesStreamIdleTimeout(2*time.Minute),
+)
+```
+
+Pass `0` only when an endpoint intentionally permits unlimited idle time. Negative durations are rejected when a Responses stream is started. The option does not affect non-streaming calls or Chat Completions.
+
+Responses streams derive the event type from the JSON payload and fall back to the SSE `event:` field when the payload omits `type`, so standard data-only SSE and event-typed streams are both accepted. When both types are present they must agree. A JSON data frame with neither type is not a valid keepalive; endpoints should use SSE comments for keepalives. Once an event type is recognized, malformed JSON, wrong field types, and missing or null fields required to project that event terminate the stream with `StreamProtocolError` instead of silently dropping output.
+
+Streams must end with `response.completed`, `response.incomplete`, `response.failed`, or a top-level `error` event. EOF or a bare `[DONE]` before one of those terminal events is a protocol error; completed and incomplete responses return immediately without waiting for the connection to close. For a non-standard endpoint that only emits `[DONE]`, explicitly opt in with `openai.WithResponsesStreamDoneCompatibility(true)`. That option changes only terminal-sentinel handling; it does not relax event typing or schema validation.
+
+Terminal usage is captured when provided. For compatibility with existing gateways, a completed or incomplete response that omits `usage` finishes with zero usage; when a `usage` object is present, both `input_tokens` and `output_tokens` are required.
+
+Idle and protocol failures are typed:
+
+```go
+var idleErr *openai.StreamIdleTimeoutError
+var protocolErr *openai.StreamProtocolError
+streamErr := stream.Err()
+
+if errors.As(streamErr, &idleErr) {
+    // Transient provider inactivity. idleErr also satisfies net.Error.
+}
+if errors.As(streamErr, &protocolErr) {
+    // Premature EOF, malformed terminal event, or invalid Responses framing.
+}
+```
 
 ### Provider Options (via `goai.WithProviderOptions`)
 

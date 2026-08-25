@@ -17,7 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sync"
+	"time"
 
 	"github.com/zendev-sh/goai"
 	"github.com/zendev-sh/goai/internal/httpc"
@@ -38,10 +38,12 @@ const defaultBaseURL = "https://api.openai.com/v1"
 type Option func(*options)
 
 type options struct {
-	tokenSource provider.TokenSource
-	baseURL     string
-	headers     map[string]string
-	httpClient  *http.Client
+	tokenSource                provider.TokenSource
+	baseURL                    string
+	headers                    map[string]string
+	httpClient                 *http.Client
+	responsesStreamIdleTimeout time.Duration
+	responsesStreamAllowDone   bool
 }
 
 // WithAPIKey sets a static API key for authentication.
@@ -85,7 +87,10 @@ func WithHTTPClient(c *http.Client) Option {
 
 // Chat creates an OpenAI language model for the given model ID.
 func Chat(modelID string, opts ...Option) provider.LanguageModel {
-	o := options{baseURL: defaultBaseURL}
+	o := options{
+		baseURL:                    defaultBaseURL,
+		responsesStreamIdleTimeout: DefaultResponsesStreamIdleTimeout,
+	}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -190,6 +195,10 @@ func (m *chatModel) doGenerateChatCompletions(ctx context.Context, params provid
 // --- Responses API ---
 
 func (m *chatModel) doStreamResponses(ctx context.Context, params provider.GenerateParams) (*provider.StreamResult, error) {
+	if m.opts.responsesStreamIdleTimeout < 0 {
+		return nil, fmt.Errorf("openai: Responses stream idle timeout must be non-negative: %s", m.opts.responsesStreamIdleTimeout)
+	}
+
 	body := buildResponsesRequest(params, m.id, true)
 
 	resp, err := m.doHTTP(ctx, m.opts.baseURL+"/responses", body)
@@ -199,22 +208,10 @@ func (m *chatModel) doStreamResponses(ctx context.Context, params provider.Gener
 
 	out := make(chan provider.StreamChunk, 64)
 	go func() {
-		var closeOnce sync.Once
-		closeBody := func() { closeOnce.Do(func() { _ = resp.Body.Close() }) }
-		// Close body on context cancellation to unblock scanner.Scan().
-		// Without this, the goroutine leaks if the server stalls mid-stream.
-		done := make(chan struct{})
-		defer close(done)
-		go func() {
-			select {
-			case <-ctx.Done():
-				closeBody()
-			case <-done:
-			}
-		}()
-		// Wrap body so streamResponses' defer close calls closeBody, not raw Close,
-		// preventing double-close when context cancellation races with normal completion.
-		streamResponses(ctx, onceCloser{resp.Body, closeBody}, out)
+		streamResponsesWithConfig(ctx, resp.Body, out, responsesStreamConfig{
+			idleTimeout: m.opts.responsesStreamIdleTimeout,
+			allowDone:   m.opts.responsesStreamAllowDone,
+		})
 	}()
 
 	return &provider.StreamResult{Stream: out}, nil
@@ -235,19 +232,6 @@ func (m *chatModel) doGenerateResponses(ctx context.Context, params provider.Gen
 	}
 
 	return parseResponsesResult(respBody)
-}
-
-// onceCloser wraps an io.ReadCloser so that Close is idempotent via a provided
-// close function. Used to prevent double-close when context cancellation races
-// with the normal end-of-stream close inside streamResponses.
-type onceCloser struct {
-	io.Reader
-	closeFn func()
-}
-
-func (o onceCloser) Close() error {
-	o.closeFn()
-	return nil
 }
 
 // --- HTTP helpers ---
@@ -290,4 +274,3 @@ func (m *chatModel) shouldUseResponsesAPI(params provider.GenerateParams) bool {
 	// Default: all models use Responses API (matches Vercel).
 	return true
 }
-
