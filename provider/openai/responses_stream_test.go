@@ -113,6 +113,9 @@ func TestResponsesStreamIdleTimeoutErrorContract(t *testing.T) {
 	if idleErr.Idle != idle || !isResponsesIdleTimeout(chunk.Error) {
 		t.Fatalf("idle error = %#v", idleErr)
 	}
+	if idleErr.Error() != "openai responses stream idle for 25ms" || !idleErr.Temporary() {
+		t.Fatalf("idle error contract = %q, temporary = %v", idleErr.Error(), idleErr.Temporary())
+	}
 	var netErr net.Error
 	if !errors.As(chunk.Error, &netErr) || !netErr.Timeout() {
 		t.Fatalf("error does not satisfy transient net.Error timeout contract: %v", chunk.Error)
@@ -132,7 +135,6 @@ func TestResponsesStreamEventActivityResetsIdleTimeout(t *testing.T) {
 	}{
 		{name: "in progress", eventType: "response.in_progress", data: `{"response":{"id":"resp_1"}}`},
 		{name: "unknown valid event", eventType: "response.rate_limits.updated", data: `{"remaining":10}`},
-		{name: "malformed nonterminal event", eventType: "response.metadata", data: `{not-json}`},
 	}
 
 	for _, tt := range tests {
@@ -395,18 +397,109 @@ func TestResponsesStreamProtocolErrorContract(t *testing.T) {
 	drainChunks(t, out)
 }
 
-func TestResponsesStreamRejectsMismatchedTerminalPayloadType(t *testing.T) {
-	input := sseLine(
-		"response.completed",
-		`{"type":"response.failed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
-	)
+func TestResponsesStreamAcceptsDataOnlyEvents(t *testing.T) {
+	input := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+	out := make(chan provider.StreamChunk, 4)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
+
+	var text string
+	var gotFinish bool
+	for chunk := range out {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		if chunk.Type == provider.ChunkText {
+			text += chunk.Text
+		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+	}
+	if text != "hello" || !gotFinish {
+		t.Fatalf("text = %q, finish = %v; want hello and finish", text, gotFinish)
+	}
+}
+
+func TestResponsesStreamRejectsMismatchedPayloadType(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		data      string
+	}{
+		{
+			name:      "nonterminal",
+			eventType: "response.output_text.delta",
+			data:      `{"type":"response.refusal.delta","delta":"no"}`,
+		},
+		{
+			name:      "terminal",
+			eventType: "response.completed",
+			data:      `{"type":"response.failed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := make(chan provider.StreamChunk, 4)
+			streamResponses(t.Context(), io.NopCloser(strings.NewReader(sseLine(tt.eventType, tt.data))), out)
+
+			chunk := receiveChunk(t, out)
+			var protocolErr *StreamProtocolError
+			if !errors.As(chunk.Error, &protocolErr) || protocolErr.EventType != tt.eventType {
+				t.Fatalf("error = %T %v, want payload mismatch for %q", chunk.Error, chunk.Error, tt.eventType)
+			}
+			if protocolErr.Reason != "event type does not match payload type" {
+				t.Fatalf("reason = %q", protocolErr.Reason)
+			}
+			if !strings.Contains(protocolErr.Error(), tt.eventType) {
+				t.Fatalf("error %q does not identify event type %q", protocolErr.Error(), tt.eventType)
+			}
+			drainChunks(t, out)
+		})
+	}
+}
+
+func TestResponsesIdleTimerReset(t *testing.T) {
+	disabled := newResponsesIdleTimer(0)
+	disabled.reset(time.Second)
+	disabled.stop()
+
+	timer := newResponsesIdleTimer(time.Hour)
+	t.Cleanup(timer.stop)
+	timer.reset(20 * time.Millisecond)
+	select {
+	case <-timer.c:
+	case <-time.After(time.Second):
+		t.Fatal("reset timer did not fire")
+	}
+}
+
+func TestResponsesStreamRejectsMalformedNonterminalEvent(t *testing.T) {
+	out := make(chan provider.StreamChunk, 4)
+	streamResponses(t.Context(), io.NopCloser(strings.NewReader(sseLine("response.output_text.delta", `{not-json}`))), out)
+
+	chunk := receiveChunk(t, out)
+	var protocolErr *StreamProtocolError
+	if chunk.Type != provider.ChunkError || !errors.As(chunk.Error, &protocolErr) {
+		t.Fatalf("chunk = %#v, want protocol error", chunk)
+	}
+	if protocolErr.EventType != "response.output_text.delta" || protocolErr.Reason != "event data is not valid JSON" {
+		t.Fatalf("protocol error = %#v", protocolErr)
+	}
+	drainChunks(t, out)
+}
+
+func TestResponsesStreamRejectsUnterminatedTerminalEvent(t *testing.T) {
+	input := "event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}"
 	out := make(chan provider.StreamChunk, 4)
 	streamResponses(t.Context(), io.NopCloser(strings.NewReader(input)), out)
 
 	chunk := receiveChunk(t, out)
 	var protocolErr *StreamProtocolError
-	if !errors.As(chunk.Error, &protocolErr) || protocolErr.EventType != "response.completed" {
-		t.Fatalf("error = %T %v, want terminal payload mismatch", chunk.Error, chunk.Error)
+	if chunk.Type != provider.ChunkError || !errors.As(chunk.Error, &protocolErr) {
+		t.Fatalf("chunk = %#v, want protocol error", chunk)
+	}
+	if protocolErr.Reason != "stream ended before a terminal event" {
+		t.Fatalf("reason = %q", protocolErr.Reason)
 	}
 	drainChunks(t, out)
 }

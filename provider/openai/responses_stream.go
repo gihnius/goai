@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -208,20 +209,20 @@ func (t *responsesIdleTimer) stop() {
 	}
 }
 
-func isResponsesTerminalEvent(eventType string) bool {
-	switch eventType {
-	case "response.completed", "response.incomplete", "response.failed", "error":
-		return true
-	default:
-		return false
+func responsesEventType(event sse.Event) (string, error) {
+	var envelope struct {
+		Type string `json:"type"`
 	}
-}
-
-func validateResponsesPayloadType(eventType, payloadType string) error {
-	if payloadType != "" && payloadType != eventType {
-		return newStreamProtocolError(eventType, "event type does not match payload type", nil)
+	if err := json.Unmarshal(event.Data, &envelope); err != nil {
+		return "", newStreamProtocolError(event.Type, "event data is not valid JSON", err)
 	}
-	return nil
+	if event.Type != "" && envelope.Type != "" && event.Type != envelope.Type {
+		return "", newStreamProtocolError(event.Type, "event type does not match payload type", nil)
+	}
+	if event.Type != "" {
+		return event.Type, nil
+	}
+	return envelope.Type, nil
 }
 
 func trySendResponsesError(ctx context.Context, out chan<- provider.StreamChunk, err error) bool {

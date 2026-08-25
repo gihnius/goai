@@ -590,26 +590,20 @@ func streamResponsesWithConfig(
 			return
 		}
 
-		eventType := read.event.Type
 		data := string(read.event.Data)
-		terminalEvent := isResponsesTerminalEvent(eventType)
 
 		if data == "[DONE]" {
 			if config.allowDone {
 				provider.TrySend(ctx, out, provider.StreamChunk{Type: provider.ChunkFinish, Usage: usage})
 				return
 			}
-			trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "stream ended with [DONE] before a terminal event", nil))
+			trySendResponsesError(ctx, out, newStreamProtocolError(read.event.Type, "stream ended with [DONE] before a terminal event", nil))
 			return
 		}
-		if !json.Valid(read.event.Data) {
-			err := newStreamProtocolError(eventType, "event data is not valid JSON", nil)
-			if terminalEvent {
-				trySendResponsesError(ctx, out, err)
-				return
-			}
-			idleTimer.reset(config.idleTimeout)
-			continue
+		eventType, err := responsesEventType(read.event)
+		if err != nil {
+			trySendResponsesError(ctx, out, err)
+			return
 		}
 
 		switch eventType {
@@ -835,7 +829,6 @@ func streamResponsesWithConfig(
 
 		case "response.completed", "response.incomplete":
 			var ev struct {
-				Type     string `json:"type"`
 				Response *struct {
 					ID                string `json:"id"`
 					Model             string `json:"model"`
@@ -856,10 +849,6 @@ func streamResponsesWithConfig(
 			}
 			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
 				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
-				return
-			}
-			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
-				trySendResponsesError(ctx, out, err)
 				return
 			}
 			if ev.Response == nil {
@@ -919,7 +908,6 @@ func streamResponsesWithConfig(
 
 		case "response.failed":
 			var ev struct {
-				Type     string `json:"type"`
 				Response *struct {
 					Error struct {
 						Message string `json:"message"`
@@ -929,10 +917,6 @@ func streamResponsesWithConfig(
 			}
 			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
 				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
-				return
-			}
-			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
-				trySendResponsesError(ctx, out, err)
 				return
 			}
 			if ev.Response == nil {
@@ -947,7 +931,6 @@ func streamResponsesWithConfig(
 		case "error":
 			// OpenAI documents flat message/code fields, but production often nests them under error.
 			var ev struct {
-				Type    string `json:"type"`
 				Message string `json:"message"`
 				Code    string `json:"code"`
 				Error   *struct {
@@ -957,10 +940,6 @@ func streamResponsesWithConfig(
 			}
 			if err := json.Unmarshal(read.event.Data, &ev); err != nil {
 				trySendResponsesError(ctx, out, newStreamProtocolError(eventType, "malformed terminal event", err))
-				return
-			}
-			if err := validateResponsesPayloadType(eventType, ev.Type); err != nil {
-				trySendResponsesError(ctx, out, err)
 				return
 			}
 			// Prefer the nested error fields when present, but fall back to

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestScanner_BasicEvents(t *testing.T) {
@@ -142,6 +143,10 @@ type errReader struct{ err error }
 
 func (e *errReader) Read(_ []byte) (int, error) { return 0, e.err }
 
+type noProgressReader struct{}
+
+func (noProgressReader) Read(_ []byte) (int, error) { return 0, nil }
+
 func TestScanner_ReadError(t *testing.T) {
 	injected := errors.New("stream broken")
 	// First reader yields one valid event; second reader immediately returns the error.
@@ -163,6 +168,17 @@ func TestScanner_ReadError(t *testing.T) {
 
 	if err := s.Err(); !errors.Is(err, injected) {
 		t.Errorf("Err() = %v; want injected error %v", err, injected)
+	}
+}
+
+func TestScanner_NoProgress(t *testing.T) {
+	s := NewScanner(noProgressReader{})
+
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an event from a reader making no progress")
+	}
+	if err := s.Err(); !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("Err() = %v, want io.ErrNoProgress", err)
 	}
 }
 
@@ -392,6 +408,81 @@ func TestScanner_NextEvent(t *testing.T) {
 	}
 }
 
+func TestScanner_NextEvent_LineEndings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "CR", input: "event: first\rdata: payload\r\r"},
+		{name: "mixed", input: "event: first\r\ndata: payload\n\r"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScanner(strings.NewReader(tt.input))
+			event, ok := s.NextEvent()
+			if !ok {
+				t.Fatalf("NextEvent() did not return event; Err=%v", s.Err())
+			}
+			if event.Type != "first" || string(event.Data) != "payload" {
+				t.Fatalf("event = %#v", event)
+			}
+			if _, ok := s.NextEvent(); ok {
+				t.Fatal("NextEvent() returned an event after EOF")
+			}
+			if err := s.Err(); err != nil {
+				t.Fatalf("Err() = %v", err)
+			}
+		})
+	}
+}
+
+func TestScanner_NextEvent_CRDispatchesBeforeEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+	s := NewScanner(reader)
+
+	result := make(chan Event, 1)
+	go func() {
+		event, ok := s.NextEvent()
+		if ok {
+			result <- event
+		}
+		close(result)
+	}()
+
+	if _, err := io.WriteString(writer, "event: first\rdata: payload\r\r"); err != nil {
+		t.Fatalf("write CR-only event: %v", err)
+	}
+
+	select {
+	case event, ok := <-result:
+		if !ok {
+			t.Fatalf("NextEvent() stopped before EOF; Err=%v", s.Err())
+		}
+		if event.Type != "first" || string(event.Data) != "payload" {
+			t.Fatalf("event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("NextEvent() did not dispatch CR-only event before EOF")
+	}
+}
+
+func TestScanner_NextEvent_StripsInitialBOM(t *testing.T) {
+	s := NewScanner(strings.NewReader("\xef\xbb\xbfevent: first\ndata: payload\n\n"))
+
+	event, ok := s.NextEvent()
+	if !ok {
+		t.Fatalf("NextEvent() did not return event; Err=%v", s.Err())
+	}
+	if event.Type != "first" || string(event.Data) != "payload" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
 func TestScanner_NextEvent_IgnoresCommentsAndEmptyFrames(t *testing.T) {
 	input := ": ping\n\n\nevent: metadata\n\ndata: value\n\n"
 	s := NewScanner(strings.NewReader(input))
@@ -405,18 +496,33 @@ func TestScanner_NextEvent_IgnoresCommentsAndEmptyFrames(t *testing.T) {
 	}
 }
 
-func TestScanner_NextEvent_FinalPartialEvent(t *testing.T) {
+func TestScanner_NextEvent_DiscardsFinalPartialEvent(t *testing.T) {
 	s := NewScanner(strings.NewReader("event: final\ndata: payload"))
 
-	event, ok := s.NextEvent()
-	if !ok {
-		t.Fatal("NextEvent() did not return final partial event")
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an unterminated event")
 	}
-	if event.Type != "final" || string(event.Data) != "payload" {
-		t.Fatalf("event = %#v", event)
+	if err := s.Err(); err != nil {
+		t.Fatalf("Err() = %v", err)
+	}
+}
+
+func TestScanner_NextEvent_ReadError(t *testing.T) {
+	injected := errors.New("stream broken")
+	r := io.MultiReader(
+		strings.NewReader("event: partial\ndata: payload\n"),
+		&errReader{err: injected},
+	)
+	s := NewScanner(r)
+
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an event after read error")
+	}
+	if err := s.Err(); !errors.Is(err, injected) {
+		t.Fatalf("Err() = %v, want injected error", err)
 	}
 	if _, ok := s.NextEvent(); ok {
-		t.Fatal("NextEvent() returned an event after EOF")
+		t.Fatal("NextEvent() returned an event on repeat call after error")
 	}
 }
 
@@ -430,5 +536,8 @@ func TestScanner_NextEvent_EventExceedsMaxSize(t *testing.T) {
 	}
 	if err := s.Err(); err == nil || !strings.Contains(err.Error(), "event exceeds") {
 		t.Fatalf("Err() = %v, want event size error", err)
+	}
+	if _, ok := s.NextEvent(); ok {
+		t.Fatal("NextEvent() returned an event on repeat call after size error")
 	}
 }

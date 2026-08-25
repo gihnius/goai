@@ -187,7 +187,7 @@ model := openai.Chat("gpt-5",
 
 Pass `0` only when an endpoint intentionally permits unlimited idle time. Negative durations are rejected when a Responses stream is started. The option does not affect non-streaming calls or Chat Completions.
 
-Responses streams must end with `response.completed`, `response.incomplete`, `response.failed`, or a top-level `error` event. EOF or a bare `[DONE]` before one of those terminal events is a protocol error; completed and incomplete responses return immediately without waiting for the connection to close. For a non-standard endpoint that only emits `[DONE]`, explicitly opt in with `openai.WithResponsesStreamDoneCompatibility(true)`.
+Responses streams derive the event type from the JSON payload and fall back to the SSE `event:` field when the payload omits `type`, so standard data-only SSE and event-typed streams are both accepted. When both types are present they must agree. Streams must end with `response.completed`, `response.incomplete`, `response.failed`, or a top-level `error` event. EOF or a bare `[DONE]` before one of those terminal events is a protocol error; completed and incomplete responses return immediately without waiting for the connection to close. For a non-standard endpoint that only emits `[DONE]`, explicitly opt in with `openai.WithResponsesStreamDoneCompatibility(true)`.
 
 Terminal usage is captured when provided. For compatibility with existing gateways, a completed or incomplete response that omits `usage` finishes with zero usage; when a `usage` object is present, both `input_tokens` and `output_tokens` are required.
 

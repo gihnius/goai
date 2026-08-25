@@ -70,6 +70,40 @@ func TestChat_Stream(t *testing.T) {
 	}
 }
 
+func TestChat_ResponsesStreamDataOnlyFraming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "\xef\xbb\xbfdata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\r\r")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\r\r")
+	}))
+	defer server.Close()
+
+	model := Chat("gpt-5", WithAPIKey("test-key"), WithEndpoint(server.URL))
+	result, err := model.DoStream(t.Context(), provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text string
+	var gotFinish bool
+	for chunk := range result.Stream {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("unexpected stream error: %v", chunk.Error)
+		}
+		if chunk.Type == provider.ChunkText {
+			text += chunk.Text
+		}
+		gotFinish = gotFinish || chunk.Type == provider.ChunkFinish
+	}
+	if text != "Hello" || !gotFinish {
+		t.Fatalf("text = %q, finish = %v; want Hello and finish", text, gotFinish)
+	}
+}
+
 func TestChat_ResponsesStreamIdleTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
