@@ -205,10 +205,12 @@ func (m *chatModel) doStreamResponses(ctx context.Context, params provider.Gener
 	if err != nil {
 		return nil, err
 	}
+	// Keep resp.Request and its serialized request body out of the stream closure.
+	responseBody := resp.Body
 
 	out := make(chan provider.StreamChunk, 64)
 	go func() {
-		streamResponsesWithConfig(ctx, resp.Body, out, responsesStreamConfig{
+		streamResponsesWithConfig(ctx, responseBody, out, responsesStreamConfig{
 			idleTimeout: m.opts.responsesStreamIdleTimeout,
 			allowDone:   m.opts.responsesStreamAllowDone,
 		})

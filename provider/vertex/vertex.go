@@ -387,16 +387,18 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 	if err != nil {
 		return nil, err
 	}
+	// Keep resp.Request and its serialized request body out of the stream closure.
+	responseBody := resp.Body
 
 	out := make(chan provider.StreamChunk, 64)
-	scanner := sse.NewScanner(resp.Body)
+	scanner := sse.NewScanner(responseBody)
 	go func() {
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { _ = responseBody.Close() }()
 		done := make(chan struct{})
 		go func() {
 			select {
 			case <-ctx.Done():
-				_ = resp.Body.Close()
+				_ = responseBody.Close()
 			case <-done:
 			}
 		}()
