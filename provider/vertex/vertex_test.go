@@ -9,9 +9,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendev-sh/goai/provider"
 )
+
+type vertexRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f vertexRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestChat_Stream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +52,50 @@ func TestChat_Stream(t *testing.T) {
 	}
 	if len(texts) != 1 || texts[0] != "Hello" {
 		t.Errorf("texts = %v, want [Hello]", texts)
+	}
+}
+
+func TestChat_Stream_ContextCancelClosesResponseBody(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	client := &http.Client{Transport: vertexRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       reader,
+		}, nil
+	})}
+	model := Chat("gemini-2.5-pro",
+		WithTokenSource(provider.StaticToken("test-token")),
+		WithBaseURL("http://vertex.test"),
+		WithHTTPClient(client))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	result, err := model.DoStream(ctx, provider.GenerateParams{
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancel()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-result.Stream:
+			if !ok {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("stream did not close after context cancellation")
+		}
 	}
 }
 
