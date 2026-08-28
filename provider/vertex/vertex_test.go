@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,23 @@ import (
 	"github.com/zendev-sh/goai/provider"
 )
 
-type vertexRoundTripFunc func(*http.Request) (*http.Response, error)
+type requestTrackingTransport struct {
+	responseBody     io.ReadCloser
+	requestCollected chan struct{}
+}
 
-func (f vertexRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func (t *requestTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	runtime.AddCleanup(req, func(collected chan struct{}) {
+		close(collected)
+	}, t.requestCollected)
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       t.responseBody,
+		Request:    req,
+	}, nil
+}
 
 func TestChat_Stream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,26 +70,25 @@ func TestChat_Stream(t *testing.T) {
 	}
 }
 
-func TestChat_Stream_ContextCancelClosesResponseBody(t *testing.T) {
+func TestChat_Stream_DoesNotRetainRequestGraph(t *testing.T) {
 	reader, writer := io.Pipe()
 	t.Cleanup(func() {
 		_ = reader.Close()
 		_ = writer.Close()
 	})
 
-	client := &http.Client{Transport: vertexRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       reader,
-		}, nil
-	})}
+	requestCollected := make(chan struct{})
+	client := &http.Client{Transport: &requestTrackingTransport{
+		responseBody:     reader,
+		requestCollected: requestCollected,
+	}}
 	model := Chat("gemini-2.5-pro",
 		WithTokenSource(provider.StaticToken("test-token")),
 		WithBaseURL("http://vertex.test"),
 		WithHTTPClient(client))
 
 	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
 	result, err := model.DoStream(ctx, provider.GenerateParams{
 		Messages: []provider.Message{
 			{Role: provider.RoleUser, Content: []provider.Part{{Type: provider.PartText, Text: "hi"}}},
@@ -84,17 +98,30 @@ func TestChat_Stream_ContextCancelClosesResponseBody(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cancel()
-	timer := time.NewTimer(time.Second)
+	// The pipe keeps the stream active. The request and its serialized body
+	// should nevertheless be unreachable once DoStream returns.
+	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for {
+		runtime.GC()
 		select {
-		case _, ok := <-result.Stream:
-			if !ok {
-				return
+		case <-requestCollected:
+			cancel()
+			for {
+				select {
+				case _, ok := <-result.Stream:
+					if !ok {
+						return
+					}
+				case <-timer.C:
+					t.Fatal("stream did not close after context cancellation")
+				}
 			}
 		case <-timer.C:
-			t.Fatal("stream did not close after context cancellation")
+			t.Fatal("active stream retained its response/request graph")
+		case <-ticker.C:
 		}
 	}
 }
