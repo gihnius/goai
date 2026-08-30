@@ -18,6 +18,9 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -92,6 +95,13 @@ type options struct {
 	bodyTransformer BodyTransformer
 	errorProvider   string // provider name for error parsing (default "anthropic")
 	skipEnvResolve  bool   // skip ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL env resolution
+
+	// nativeOutputFormatModels restricts the model IDs for which native
+	// structured output (output_config.format) is enabled in "auto" mode.
+	// nil selects the direct-Anthropic documented list; an empty slice
+	// disables native structured output entirely. Platform adapters set this
+	// to their own documented compatibility set.
+	nativeOutputFormatModels []string
 }
 
 // WithAPIKey sets a static API key for authentication.
@@ -167,6 +177,40 @@ func WithSkipEnvResolve() Option {
 	}
 }
 
+// NativeOutputFormatSupport selects which documented model set enables native
+// structured output (output_config.format) in "auto" mode for a platform.
+type NativeOutputFormatSupport int
+
+const (
+	// NativeOutputFormatDirect is the default: the full documented Claude API
+	// compatibility set. Used by the direct API and platforms (Vertex, Azure)
+	// that expose the same set.
+	NativeOutputFormatDirect NativeOutputFormatSupport = iota
+	// NativeOutputFormatBedrock is the narrower documented Amazon Bedrock set.
+	NativeOutputFormatBedrock
+	// NativeOutputFormatDisabled disables native structured output entirely;
+	// the platform does not document support for the field.
+	NativeOutputFormatDisabled
+)
+
+// WithNativeOutputFormatSupport restricts which models enable native
+// structured output (output_config.format) in "auto" mode. Platform adapters
+// whose documented compatibility differs from the direct Claude API set this
+// explicitly (e.g. bedrock.WithNativeOutputFormatSupport(Bedrock),
+// minimax.WithNativeOutputFormatSupport(Disabled)).
+func WithNativeOutputFormatSupport(support NativeOutputFormatSupport) Option {
+	return func(o *options) {
+		switch support {
+		case NativeOutputFormatBedrock:
+			o.nativeOutputFormatModels = bedrockNativeOutputFormatModels
+		case NativeOutputFormatDisabled:
+			o.nativeOutputFormatModels = []string{}
+		default:
+			o.nativeOutputFormatModels = nil
+		}
+	}
+}
+
 // Chat creates an Anthropic language model for the given model ID.
 func Chat(modelID string, opts ...Option) provider.LanguageModel {
 	o := options{baseURL: defaultBaseURL}
@@ -200,11 +244,56 @@ type chatModel struct {
 
 func (m *chatModel) ModelID() string { return m.id }
 
-// supportsThinking returns true for Anthropic models that support extended thinking.
+// anthropicModelVersionPattern matches the generation numbers in a
+// current-naming Anthropic model id ("claude-<family>-<major>[-<minor>]").
+//
+// Deliberately unanchored: Bedrock reuses this provider via
+// bedrock.AnthropicChat with a prefixed id ("anthropic.claude-opus-5",
+// "us.anthropic.claude-sonnet-4-6"), and Vertex appends an "@date" suffix
+// ("claude-opus-4-5@20251101"). Legacy family-last ids ("claude-3-7-sonnet",
+// "claude-3-5-sonnet-20241022") do not match and are reported as unversioned.
+var anthropicModelVersionPattern = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?`)
+
+// anthropicModelVersion extracts the major and minor generation numbers from a
+// current-naming Anthropic model id. ok is false when the id carries no
+// parseable version, in which case callers should fall back to legacy handling.
+//
+// A trailing numeric segment is only treated as a minor version when it is one
+// or two digits; longer runs are release dates, not versions, so
+// "claude-sonnet-4-20250514" reports major 4 with no minor rather than minor
+// 20250514.
+func anthropicModelVersion(modelID string) (major, minor int, ok bool) {
+	m := anthropicModelVersionPattern.FindStringSubmatch(strings.ToLower(modelID))
+	if m == nil {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	if len(m[2]) > 0 && len(m[2]) <= 2 {
+		// Cannot fail: the pattern matched one or two ASCII digits.
+		minor, _ = strconv.Atoi(m[2])
+	}
+	return major, minor, true
+}
+
+// supportsThinking returns true for Anthropic models that support extended
+// thinking: every model from the Claude 4 generation onward, plus the legacy
+// claude-3-7-sonnet.
+//
+// Version-derived rather than a literal model list, which had gone stale for
+// the 5.x generation (claude-opus-5, claude-sonnet-5, claude-fable-5) and for
+// claude-haiku-4-5, all of which support thinking but matched none of the
+// previous substrings.
 func supportsThinking(modelID string) bool {
-	return strings.Contains(modelID, "claude-3-7-sonnet") ||
-		strings.Contains(modelID, "claude-sonnet-4") ||
-		strings.Contains(modelID, "claude-opus-4")
+	// Legacy and non-versioned aliases that support thinking but carry no
+	// parseable generation number.
+	if strings.Contains(modelID, "claude-3-7-sonnet") || strings.Contains(modelID, "claude-mythos-preview") {
+		return true
+	}
+	major, _, ok := anthropicModelVersion(modelID)
+	return ok && major >= 4
 }
 
 // hasRemoteRef returns true if any message part contains a RemoteRef.
@@ -245,7 +334,11 @@ func (m *chatModel) DoGenerate(ctx context.Context, params provider.GeneratePara
 	if rfMode {
 		params = injectResponseFormatTool(params)
 	} else if useOutputFormat {
-		params = injectNativeOutputFormat(params)
+		var err error
+		params, err = injectNativeOutputFormat(params)
+		if err != nil {
+			return nil, err
+		}
 	}
 	body := m.buildRequest(params, false)
 	toolBetas := collectToolBetas(params.Tools)
@@ -281,7 +374,11 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 	if rfMode {
 		params = injectResponseFormatTool(params)
 	} else if useOutputFormat {
-		params = injectNativeOutputFormat(params)
+		var err error
+		params, err = injectNativeOutputFormat(params)
+		if err != nil {
+			return nil, err
+		}
 	}
 	body := m.buildRequest(params, true)
 	toolBetas := collectToolBetas(params.Tools)
@@ -772,21 +869,91 @@ func (m *chatModel) useNativeOutputFormat(params provider.GenerateParams) bool {
 	}
 }
 
-// supportsNativeOutputFormat returns true for models that support native output_format.
-// Matches Vercel: claude-sonnet-4-6, claude-opus-4-6, claude-sonnet-4-5, claude-opus-4-5, claude-opus-4-1.
+// directNativeOutputFormatModels is the documented Claude API compatibility set
+// for native structured output (output_config.format), kept explicit so a
+// future model name is not enabled before the platform documentation
+// guarantees it. Release-date aliases (e.g. claude-opus-4-5-20251101) match via
+// modelIDMatches.
+//
+// Source: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#compatibility
+var directNativeOutputFormatModels = []string{
+	"claude-fable-5", "claude-mythos-5", "claude-mythos-preview",
+	"claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+	"claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5",
+	"claude-opus-4-5", "claude-haiku-4-5",
+}
+
+// bedrockNativeOutputFormatModels is the documented Amazon Bedrock subset.
+// Source: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#compatibility
+var bedrockNativeOutputFormatModels = []string{
+	"claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5",
+	"claude-opus-4-5", "claude-haiku-4-5",
+}
+
+// supportsNativeOutputFormat reports whether the model supports native
+// structured output. It consults the adapter-provided compatibility list when
+// set (Bedrock, Vertex, Azure, MiniMax), otherwise the direct-Anthropic list.
 func (m *chatModel) supportsNativeOutputFormat() bool {
-	id := m.id
-	return strings.Contains(id, "claude-sonnet-4-6") ||
-		strings.Contains(id, "claude-opus-4-6") ||
-		strings.Contains(id, "claude-sonnet-4-5") ||
-		strings.Contains(id, "claude-opus-4-5") ||
-		strings.Contains(id, "claude-opus-4-1")
+	models := m.opts.nativeOutputFormatModels
+	if models == nil {
+		models = directNativeOutputFormatModels
+	}
+	return modelMatchesAny(m.id, models)
+}
+
+// modelMatchesAny reports whether modelID matches any base model name in
+// models, allowing documented release-date, @date, and -v suffixed aliases but
+// rejecting unknown future numeric families.
+func modelMatchesAny(modelID string, models []string) bool {
+	id := strings.ToLower(modelID)
+	for _, base := range models {
+		if modelIDMatches(id, base) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelIDMatches(id, base string) bool {
+	idx := strings.Index(id, base)
+	if idx < 0 {
+		return false
+	}
+	// The base must be a whole token: preceded by a separator ('.' for Bedrock
+	// prefixes like "anthropic.claude-opus-5") or the start of the string.
+	if idx > 0 {
+		prev := id[idx-1]
+		if prev != '.' && prev != '-' && prev != '/' && prev != ':' {
+			return false
+		}
+	}
+	suffix := id[idx+len(base):]
+	if suffix == "" {
+		return true
+	}
+	// Vertex @date suffix or Bedrock -v versioned suffix.
+	if strings.HasPrefix(suffix, "@") || strings.HasPrefix(suffix, "-v") {
+		return true
+	}
+	// Release-date alias: claude-opus-4-5-20251101.
+	if len(suffix) == 9 && suffix[0] == '-' {
+		for i := 1; i < len(suffix); i++ {
+			if suffix[i] < '0' || suffix[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // injectNativeOutputFormat stores the structured-output schema in
 // ProviderOptions["output_format"]; buildRequest nests it under
-// output_config.format on the wire.
-func injectNativeOutputFormat(params provider.GenerateParams) provider.GenerateParams {
+// output_config.format on the wire. It returns an error when the response
+// format schema is invalid or cannot be expressed for native structured
+// output, so the caller surfaces it rather than silently dropping the
+// requested output mode.
+func injectNativeOutputFormat(params provider.GenerateParams) (provider.GenerateParams, error) {
 	p := params
 	// Copy the map to avoid mutating the caller's ProviderOptions.
 	newOpts := maps.Clone(p.ProviderOptions)
@@ -795,12 +962,17 @@ func injectNativeOutputFormat(params provider.GenerateParams) provider.GenerateP
 	}
 	p.ProviderOptions = newOpts
 	if p.ResponseFormat == nil {
-		return params
+		return params, nil
 	}
 	var schema any
 	if len(p.ResponseFormat.Schema) > 0 {
 		if err := json.Unmarshal(p.ResponseFormat.Schema, &schema); err != nil {
-			return params // schema invalid, fall back to tool trick
+			return params, fmt.Errorf("anthropic: invalid response format schema: %w", err)
+		}
+		var err error
+		schema, err = transformNativeOutputSchema(schema)
+		if err != nil {
+			return params, fmt.Errorf("anthropic: invalid response format schema: %w", err)
 		}
 	}
 	p.ProviderOptions["output_format"] = map[string]any{
@@ -809,7 +981,202 @@ func injectNativeOutputFormat(params provider.GenerateParams) provider.GenerateP
 	}
 	// Clear ResponseFormat so the tool trick is not also applied.
 	p.ResponseFormat = nil
-	return p
+	return p, nil
+}
+
+// supportedNativeFormats lists the string formats Anthropic's native
+// structured-output validator accepts; any other format value is filtered out
+// (and recorded in the description).
+var supportedNativeFormats = map[string]bool{
+	"date-time": true, "time": true, "date": true, "duration": true,
+	"email": true, "hostname": true, "ipv4": true, "ipv6": true,
+	"uuid": true, "uri": true,
+}
+
+// transformNativeOutputSchema mirrors Anthropic's documented SDK schema
+// transformation for native structured output: keep only the keywords the
+// validator supports for the schema's effective type, preserve unsupported
+// constraints in the description, and recurse only into actual subschemas.
+// Literal values (enum members, const, default) are cloned verbatim, never
+// walked as schemas. The input is never mutated.
+//
+// Source: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#how-sdk-transformation-works
+func transformNativeOutputSchema(obj any) (any, error) {
+	m, ok := obj.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("schema must be an object")
+	}
+	remaining := maps.Clone(m)
+	out := make(map[string]any, len(m)+1)
+
+	if defs, ok := remaining["$defs"]; ok {
+		transformed, err := transformSchemaMap(defs)
+		if err != nil {
+			return nil, fmt.Errorf("$defs: %w", err)
+		}
+		out["$defs"] = transformed
+		delete(remaining, "$defs")
+	}
+	if ref, ok := remaining["$ref"]; ok {
+		out["$ref"] = cloneJSONValue(ref)
+		return out, nil
+	}
+
+	typeName, _ := remaining["type"].(string)
+	delete(remaining, "type")
+	var composition string
+	for _, keyword := range []string{"anyOf", "oneOf", "allOf"} {
+		if _, ok := remaining[keyword].([]any); ok {
+			composition = keyword
+			break
+		}
+	}
+	if composition != "" {
+		transformed, err := transformSchemaList(remaining[composition])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", composition, err)
+		}
+		if composition == "oneOf" {
+			// Anthropic does not support oneOf; express it as anyOf.
+			out["anyOf"] = transformed
+		} else {
+			out[composition] = transformed
+		}
+		delete(remaining, composition)
+	} else if typeName != "" {
+		out["type"] = typeName
+	} else {
+		return nil, fmt.Errorf("schema must have type, anyOf, oneOf, or allOf")
+	}
+
+	// Literal/annotation keywords are carried verbatim (never recursed).
+	for _, keyword := range []string{"enum", "const", "description", "title"} {
+		if value, ok := remaining[keyword]; ok {
+			out[keyword] = cloneJSONValue(value)
+			delete(remaining, keyword)
+		}
+	}
+
+	switch typeName {
+	case "object":
+		if properties, ok := remaining["properties"]; ok {
+			transformed, err := transformSchemaMap(properties)
+			if err != nil {
+				return nil, fmt.Errorf("properties: %w", err)
+			}
+			out["properties"] = transformed
+		} else {
+			out["properties"] = map[string]any{}
+		}
+		delete(remaining, "properties")
+		// Anthropic requires additionalProperties:false on objects.
+		delete(remaining, "additionalProperties")
+		out["additionalProperties"] = false
+		if required, ok := remaining["required"]; ok {
+			out["required"] = cloneJSONValue(required)
+			delete(remaining, "required")
+		}
+	case "array":
+		if items, ok := remaining["items"]; ok {
+			transformed, err := transformNativeOutputSchema(items)
+			if err != nil {
+				return nil, fmt.Errorf("items: %w", err)
+			}
+			out["items"] = transformed
+			delete(remaining, "items")
+		}
+		// Anthropic accepts minItems only as 0 or 1; anything else is
+		// unsupported and falls through to the description.
+		if minItems, ok := remaining["minItems"].(float64); ok && (minItems == 0 || minItems == 1) {
+			out["minItems"] = minItems
+			delete(remaining, "minItems")
+		}
+	case "string":
+		if format, ok := remaining["format"].(string); ok && supportedNativeFormats[format] {
+			out["format"] = format
+			delete(remaining, "format")
+		}
+	case "integer", "number", "boolean", "null", "":
+	default:
+		return nil, fmt.Errorf("unsupported schema type %q", typeName)
+	}
+
+	// Anything left (pattern, patternProperties, dependentSchemas, unsupported
+	// constraints, etc.) is not expressible as a native constraint; record it
+	// in the description so it is not silently dropped.
+	if len(remaining) > 0 {
+		extra := formatUnsupportedSchemaKeywords(remaining)
+		if description, _ := out["description"].(string); description != "" {
+			out["description"] = description + "\n\n" + extra
+		} else {
+			out["description"] = extra
+		}
+	}
+	return out, nil
+}
+
+func transformSchemaMap(value any) (any, error) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an object")
+	}
+	out := make(map[string]any, len(m))
+	for name, schema := range m {
+		transformed, err := transformNativeOutputSchema(schema)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		out[name] = transformed
+	}
+	return out, nil
+}
+
+func transformSchemaList(value any) (any, error) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an array")
+	}
+	out := make([]any, len(items))
+	for i, schema := range items {
+		transformed, err := transformNativeOutputSchema(schema)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		out[i] = transformed
+	}
+	return out, nil
+}
+
+func formatUnsupportedSchemaKeywords(values map[string]any) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %v", key, values[key]))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func cloneJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			out[k] = cloneJSONValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = cloneJSONValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 const responseFormatToolName = "json_response"
