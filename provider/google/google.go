@@ -257,11 +257,13 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 	if err != nil {
 		return nil, err
 	}
+	// Keep resp.Request and its serialized request body out of the stream closure.
+	responseBody := resp.Body
 
 	out := make(chan provider.StreamChunk, 64)
 	go func() {
 		var closeOnce sync.Once
-		closeBody := func() { closeOnce.Do(func() { _ = resp.Body.Close() }) }
+		closeBody := func() { closeOnce.Do(func() { _ = responseBody.Close() }) }
 		defer closeBody()
 		// Close body on context cancellation to unblock scanner.Scan().
 		// Without this, the goroutine leaks if the server stalls mid-stream.
@@ -274,7 +276,7 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 			}
 		}()
 		defer close(done)
-		parseSSE(ctx, resp.Body, out)
+		parseSSE(ctx, responseBody, out)
 	}()
 
 	return &provider.StreamResult{Stream: out}, nil

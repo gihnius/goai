@@ -333,18 +333,20 @@ func (m *Model) DoStream(ctx context.Context, params provider.GenerateParams) (*
 	if err != nil {
 		return nil, err
 	}
+	// Keep resp.Request and its serialized request body out of the stream closure.
+	responseBody := resp.Body
 
 	ch := make(chan provider.StreamChunk, streamBufSize)
 
 	go func() {
 		defer close(ch)
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { _ = responseBody.Close() }()
 
 		var lastResp ollamaChatResponse
 
 		// Read NDJSON with sse.Scanner: no 64 KiB per-line limit (unlike
 		// bufio.Scanner) while still bounding each line to sse.MaxLineSize.
-		scanner := sse.NewScanner(resp.Body)
+		scanner := sse.NewScanner(responseBody)
 		for {
 			line, ok := scanner.NextLine()
 			if !ok {

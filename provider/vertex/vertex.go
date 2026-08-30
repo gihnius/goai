@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/zendev-sh/goai"
 	"github.com/zendev-sh/goai/internal/gemini"
@@ -387,16 +388,22 @@ func (m *chatModel) DoStream(ctx context.Context, params provider.GenerateParams
 	if err != nil {
 		return nil, err
 	}
+	// Keep resp.Request and its serialized request body out of the stream closure.
+	responseBody := resp.Body
 
 	out := make(chan provider.StreamChunk, 64)
-	scanner := sse.NewScanner(resp.Body)
+	scanner := sse.NewScanner(responseBody)
 	go func() {
-		defer func() { _ = resp.Body.Close() }()
+		// Guard against closing the body twice: the cancellation goroutine and
+		// the stream defer both close it. sync.Once makes the second call a no-op.
+		var closeOnce sync.Once
+		closeBody := func() { closeOnce.Do(func() { _ = responseBody.Close() }) }
+		defer closeBody()
 		done := make(chan struct{})
 		go func() {
 			select {
 			case <-ctx.Done():
-				_ = resp.Body.Close()
+				closeBody()
 			case <-done:
 			}
 		}()
