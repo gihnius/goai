@@ -211,20 +211,28 @@ func TestScanner_VeryLongLine(t *testing.T) {
 }
 
 func TestScanner_LineExceedsMaxSize(t *testing.T) {
-	// A single line larger than MaxLineSize must be rejected with an error,
-	// not silently consumed (DoS protection).
-	oversized := strings.Repeat("x", MaxLineSize+1)
-	input := "data: " + oversized + "\n"
-	s := NewScanner(strings.NewReader(input))
-
-	data, ok := s.Next()
-	if ok {
-		t.Errorf("expected ok=false for oversized line, got data len=%d", len(data))
-	}
-	if err := s.Err(); err == nil {
-		t.Fatal("expected Err() to report oversized line, got nil")
-	} else if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("expected size-limit error, got: %v", err)
+	// Reject oversized lines both when the terminator arrives and while still
+	// waiting for one, so an unterminated stream cannot bypass the size limit.
+	oversized := "data: " + strings.Repeat("x", MaxLineSize+1)
+	for _, tc := range []struct {
+		name   string
+		suffix string
+	}{
+		{"terminated", "\n"},
+		{"unterminated", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewScanner(strings.NewReader(oversized + tc.suffix))
+			if data, ok := s.Next(); ok {
+				t.Errorf("expected ok=false for oversized line, got data len=%d", len(data))
+			}
+			if err := s.Err(); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("Err() = %v, want size-limit error", err)
+			}
+			if _, ok := s.Next(); ok {
+				t.Fatal("Next() returned data after size error")
+			}
+		})
 	}
 }
 
