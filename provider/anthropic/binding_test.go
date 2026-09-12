@@ -134,9 +134,12 @@ func TestThinkingBindingEmptyBetaHeader(t *testing.T) {
 func TestInputTransformations(t *testing.T) {
 	const dropped = `[{"type":"thinking_dropped","reason":"prefix_binding_mismatch","path":"messages.1.content.0","extra":{"preserved":true}},{"type":"thinking_dropped","reason":"model_binding_mismatch","path":"messages.3.content.0"}]`
 	for _, transport := range []string{"json", "auto-stream", "stream"} {
-		for _, location := range []string{"start", "delta", "empty", "clear", "absent", "null", "null-delta"} {
+		for _, location := range []string{"start", "delta", "delta-only", "null-entry", "empty", "clear", "absent", "null", "null-delta"} {
 			t.Run(transport+"/"+location, func(t *testing.T) {
 				wantRaw := dropped
+				if location == "null-entry" {
+					wantRaw = `[null,{"type":"future","path":"messages.1.content.0","reason":"unknown"}]`
+				}
 				if location == "empty" || location == "clear" {
 					wantRaw = "[]"
 				}
@@ -159,6 +162,9 @@ func TestInputTransformations(t *testing.T) {
 					if location == "delta" {
 						start = `,"input_transformations":[]`
 						delta = field
+					}
+					if location == "delta-only" {
+						start, delta = "", field
 					}
 					if location == "clear" {
 						start = `,"input_transformations":` + dropped
