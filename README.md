@@ -43,7 +43,7 @@ Inspired by the [Vercel AI SDK](https://sdk.vercel.ai). The same clean abstracti
 ## Features
 
 - **8 core functions**: `GenerateText`, `StreamText`, `GenerateObject[T]`, `StreamObject[T]`, `Embed`, `EmbedMany`, `GenerateImage`, `GenerateVideo`
-- **25+ providers**: OpenAI, Anthropic, Google, Bedrock, Azure, Vertex, Mistral, xAI, Groq, Cohere, DeepSeek, MiniMax, Fireworks, Together, DeepInfra, OpenRouter, Requesty, Perplexity, Cerebras, Ollama, vLLM, RunPod, Cloudflare Workers AI, FPT Smart Cloud, NVIDIA NIM, llama.cpp, + generic OpenAI-compatible
+- **25+ providers**: OpenAI, Anthropic, Google, Bedrock, Azure, Vertex, Mistral, xAI, Groq, Cohere, DeepSeek, MiniMax, Fireworks, Together, DeepInfra, OpenRouter, Requesty, Perplexity, Cerebras, Ollama, vLLM, RunPod, Cloudflare Workers AI, FPT Smart Cloud, NVIDIA NIM, Heabsy, llama.cpp, + generic OpenAI-compatible
 - **Auto tool loop**: Define tools with `Execute` handlers, set `MaxSteps` for `GenerateText` and `StreamText`
 - **Structured output**: `GenerateObject[T]` auto-generates JSON Schema from Go types via reflection
 - **Streaming**: Real-time text and partial object streaming via channels
@@ -456,6 +456,7 @@ result, err := goai.GenerateText(ctx, model, goai.WithPrompt("Hello"))
 | NVIDIA NIM | `nvidia/llama-*`, `nvidia/nemotron-*`                        | `nvidia/nv-embed-*`                                        | -             | `NVIDIA_API_KEY`, `NVIDIA_BASE_URL`, TokenSource                                                   | Full | `provider/nvidia`     |
 | llama.cpp  | local models                                                 | local models                                               | -             | Optional auth via `WithAPIKey` / `WithTokenSource`                                                 | Unit | `provider/llamacpp`   |
 | Requesty   | `provider/model` (e.g. `openai/gpt-4o-mini`)                 | -                                                          | -             | `REQUESTY_API_KEY`, `REQUESTY_BASE_URL`, TokenSource                                               | Unit | `provider/requesty`   |
+| Heabsy     | open models (e.g. `qwen38`)                                  | -                                                          | -             | `HEABSY_API_KEY`, `HEABSY_BASE_URL`, TokenSource                                                   | Unit | `provider/heabsy`     |
 | Compat     | any OpenAI-compatible                                        | any                                                        | -             | configurable                                                                                       | Unit | `provider/compat`     |
 
 **E2E column**: "Full" = tested with real API calls. "Unit" = tested with mock HTTP servers (100% coverage).

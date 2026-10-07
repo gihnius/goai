@@ -169,6 +169,7 @@ export default defineConfig({
                 { text: 'RunPod', link: '/providers/runpod' },
                 { text: 'Cloudflare Workers AI', link: '/providers/cloudflare' },
                 { text: 'FPT Smart Cloud', link: '/providers/fptcloud' },
+                { text: 'Heabsy', link: '/providers/heabsy' },
               ],
             },
             {
