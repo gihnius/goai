@@ -546,6 +546,11 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			data:      `{"summary_index":"first"}`,
 		},
 		{
+			name:      "reasoning text delta",
+			eventType: "response.reasoning_text.delta",
+			data:      `{"content_index":"first"}`,
+		},
+		{
 			name:      "reasoning summary part added",
 			eventType: "response.reasoning_summary_part.added",
 			data:      `{"item_id":123,"output_index":0,"summary_index":0}`,
@@ -676,6 +681,24 @@ func TestResponsesStreamRejectsInvalidRecognizedEventSchema(t *testing.T) {
 			name:       "reasoning delta null",
 			eventType:  "response.reasoning_summary_text.delta",
 			data:       `{"item_id":"rs_1","summary_index":0,"delta":null}`,
+			wantReason: "event payload is missing required delta",
+		},
+		{
+			name:       "reasoning text item id null",
+			eventType:  "response.reasoning_text.delta",
+			data:       `{"item_id":null,"content_index":0,"delta":"thinking"}`,
+			wantReason: "event payload has null item_id",
+		},
+		{
+			name:       "reasoning text content index null",
+			eventType:  "response.reasoning_text.delta",
+			data:       `{"item_id":"rs_1","content_index":null,"delta":"thinking"}`,
+			wantReason: "event payload has null content_index",
+		},
+		{
+			name:       "reasoning text delta null",
+			eventType:  "response.reasoning_text.delta",
+			data:       `{"item_id":"rs_1","content_index":0,"delta":null}`,
 			wantReason: "event payload is missing required delta",
 		},
 		{
@@ -1070,4 +1093,31 @@ func countTerminalOutcomes(out <-chan provider.StreamChunk) int {
 		}
 	}
 	return count
+}
+
+func TestStreamResponses_ReasoningTextCancelledWhileSending(t *testing.T) {
+	// A reasoning_text delta waiting to be received when the caller cancels
+	// is dropped, and the stream ends without delivering it.
+	ctx, cancel := context.WithCancel(t.Context())
+	input := "event: response.reasoning_text.delta\n" +
+		`data: {"type":"response.reasoning_text.delta","content_index":0,"delta":"thinking","item_id":"rs_1","output_index":0}` + "\n\n"
+
+	out := make(chan provider.StreamChunk) // unbuffered, and not received from yet
+	done := make(chan struct{})
+	go func() {
+		streamResponses(ctx, io.NopCloser(strings.NewReader(input)), out)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond) // let the delta reach the send
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream did not stop after cancellation")
+	}
+	for chunk := range out {
+		if chunk.Type == provider.ChunkReasoning {
+			t.Fatalf("reasoning delivered after cancellation: %#v", chunk)
+		}
+	}
 }
