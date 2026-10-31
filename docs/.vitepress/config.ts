@@ -180,6 +180,7 @@ export default defineConfig({
               text: 'Local / Custom',
               items: [
                 { text: 'Ollama', link: '/providers/ollama' },
+                { text: 'llama.cpp', link: '/providers/llamacpp' },
                 { text: 'vLLM', link: '/providers/vllm' },
                 { text: 'Compatible', link: '/providers/compat' },
               ],

@@ -713,7 +713,7 @@ Error types:
 | `APIError`             | `StatusCode`, `Message`, `IsRetryable`, `ResponseBody`, `ResponseHeaders` | Non-2xx API responses               |
 | `ContextOverflowError` | `Message`, `ResponseBody`                                                 | Prompt exceeds model context window |
 
-Retry behavior: automatic exponential backoff on retryable HTTP errors (429/5xx, plus OpenAI 404 propagation). `retry-after-ms` and numeric `Retry-After` (seconds) are respected. Retries apply to request-level failures (including initial stream connection), not mid-stream error events.
+Retry behavior: automatic exponential backoff on retryable HTTP errors (429/5xx, plus OpenAI 404 propagation). `retry-after-ms` and `Retry-After` (both delay-seconds and HTTP-date) are respected. Retries apply to request-level failures (including initial stream connection), not mid-stream error events.
 
 ## Provider-Defined Tools
 

@@ -80,6 +80,60 @@ export GEMINI_API_KEY=...
 go run examples/citations/main.go
 ```
 
+### cloudflare-chat
+
+Non-streaming chat with Cloudflare Workers AI.
+
+- **Provider:** Cloudflare Workers AI
+- **Features:** `GenerateText`, `WithSystem`, `WithPrompt`
+- **Source:** [`examples/cloudflare-chat/`](https://github.com/zendev-sh/goai/tree/main/examples/cloudflare-chat)
+
+```bash
+export CLOUDFLARE_API_TOKEN=...
+export CLOUDFLARE_ACCOUNT_ID=...
+go run examples/cloudflare-chat/main.go
+```
+
+### fptcloud-chat
+
+Non-streaming chat with FPT Smart Cloud AI Marketplace.
+
+- **Provider:** FPT Smart Cloud
+- **Features:** `GenerateText`, `WithSystem`, `WithPrompt`
+- **Source:** [`examples/fptcloud-chat/`](https://github.com/zendev-sh/goai/tree/main/examples/fptcloud-chat)
+
+```bash
+export FPT_API_KEY=...
+# Optional: export FPT_REGION=jp    # default is "global"
+go run examples/fptcloud-chat/main.go
+```
+
+### nvidia-chat
+
+Non-streaming chat with NVIDIA NIM.
+
+- **Provider:** NVIDIA NIM
+- **Features:** `GenerateText`, `WithPrompt`
+- **Source:** [`examples/nvidia-chat/`](https://github.com/zendev-sh/goai/tree/main/examples/nvidia-chat)
+
+```bash
+export NVIDIA_API_KEY=...
+go run examples/nvidia-chat/main.go
+```
+
+### video-generation
+
+Video generation with Google Veo, including automatic long-running-operation polling.
+
+- **Provider:** Google Gemini (Veo)
+- **Features:** `GenerateVideo`, `WithVideoPrompt`, `WithVideoAspectRatio`, `WithVideoResolution`, `WithVideoDuration`, `WithVideoAudio`
+- **Source:** [`examples/video-generation/`](https://github.com/zendev-sh/goai/tree/main/examples/video-generation)
+
+```bash
+export GEMINI_API_KEY=...
+go run examples/video-generation/main.go
+```
+
 ---
 
 ## Tools
