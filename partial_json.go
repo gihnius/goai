@@ -114,7 +114,14 @@ closeAll:
 		if idx := strings.LastIndex(result, `\u`); idx >= 0 {
 			tail := result[idx:]
 			if len(tail) < 6 { // incomplete \uXXXX
-				result = result[:idx]
+				backslashes := 1
+				for i := idx - 1; i >= 0 && result[i] == '\\'; i-- {
+					backslashes++
+				}
+				// Backslash pairs are literals, not Unicode escape prefixes.
+				if backslashes%2 == 1 {
+					result = result[:idx]
+				}
 			}
 		}
 
