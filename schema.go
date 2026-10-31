@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // schemaMarshalFunc is swappable for testing the panic path.
@@ -163,36 +164,38 @@ func collectFields(t reflect.Type, properties map[string]any, required *[]string
 	for i := range t.NumField() {
 		field := t.Field(i)
 
-		// Flatten embedded (anonymous) structs.
-		if field.Anonymous {
-			ft := field.Type
-			if ft.Kind() == reflect.Ptr {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct {
-				if seen[ft] {
-					continue
-				}
-				collectFields(ft, properties, required, seen)
-				continue
-			}
+		ft := field.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		anonymousStruct := field.Anonymous && ft.Kind() == reflect.Struct
+		if !field.IsExported() && !anonymousStruct {
+			continue
 		}
 
-		if !field.IsExported() {
+		// Parse the JSON name before deciding whether an embedded field flattens.
+		tag := field.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		tagName, _, _ := strings.Cut(tag, ",")
+		if strings.ContainsFunc(tagName, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", r)
+		}) {
+			tagName = ""
+		}
+
+		if anonymousStruct && tagName == "" {
+			if seen[ft] {
+				continue
+			}
+			collectFields(ft, properties, required, seen)
 			continue
 		}
 
 		name := field.Name
-
-		// Parse json tag.
-		if tag := field.Tag.Get("json"); tag != "" {
-			parts := strings.Split(tag, ",")
-			if parts[0] == "-" && (len(parts) == 1 || parts[1] != "") {
-				continue
-			}
-			if parts[0] != "" {
-				name = parts[0]
-			}
+		if tagName != "" {
+			name = tagName
 		}
 
 		prop := typeToSchema(field.Type, seen)
