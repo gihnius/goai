@@ -331,6 +331,32 @@ Like the example, its HTTP fixture tests are run by targeting the files directly
 go test -race ./examples/mcp-parallel/main.go ./examples/mcp-parallel/main_test.go
 ```
 
+### mcp-deed-page
+
+Publish an HTML page to a public `https://{slug}.deed.page/` URL with the [deed.page](https://deed.page/docs) MCP server over Streamable HTTP, then delete it. The example discovers tools and calls `publish_site` or `delete_site` directly, without a language model, account or API key.
+
+- **Transport:** HTTP (`https://deed.page/mcp`)
+- **Requires:** Go 1.25+ and internet access
+- **Features:** `mcp.NewHTTPTransport`, `client.ListTools`, publishing and deleting a page
+- **Source:** [`examples/mcp-deed-page/`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-deed-page)
+
+From a checkout of this repository:
+
+```bash
+go mod download
+go run ./examples/mcp-deed-page/main.go
+go run ./examples/mcp-deed-page/main.go -file report.html -slug my-goai-report -ttl 0
+DEED_PAGE_TOKEN=deed_tok_... go run ./examples/mcp-deed-page/main.go -delete my-goai-report
+```
+
+The first command publishes a small sample page that expires after an hour (`-ttl`, default 3600; `0` keeps the page). The result includes the public `url`, the `slug` and, on the first publish, an owner `token`; set `DEED_PAGE_TOKEN` to that token to delete the page with `-delete`. Keep the token private, and only publish content that may be public: anyone with the URL can open it.
+
+Like the example, its HTTP fixture tests are run by targeting the files directly:
+
+```bash
+go test -race ./examples/mcp-deed-page/main.go ./examples/mcp-deed-page/main_test.go
+```
+
 ### mcp-sem
 
 Inspect a known entity and its related source with [Sem](https://github.com/Ataraxy-Labs/sem) over stdio MCP. This optional example calls only `sem_find`; it does not use a language model or require an API key.

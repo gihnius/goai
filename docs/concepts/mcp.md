@@ -197,6 +197,7 @@ For local structural code navigation without model calls, see the optional
 | [`mcp-local`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-local)           | Connect to a local stdio MCP server          |
 | [`mcp-remote`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-remote)         | Connect to a remote HTTP MCP server          |
 | [`mcp-parallel`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-parallel)     | Search and fetch web pages without an API key |
+| [`mcp-deed-page`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-deed-page) | Publish an HTML page to a public URL without an API key |
 | [`mcp-oauth`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-oauth)         | OAuth 2.1 + PKCE auth for a remote MCP server |
 | [`mcp-sse`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-sse)               | Connect via legacy SSE transport             |
 | [`mcp-tools`](https://github.com/zendev-sh/goai/tree/main/examples/mcp-tools)           | Convert MCP tools for use with GenerateText  |
