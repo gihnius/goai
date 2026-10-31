@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -673,12 +674,16 @@ func (t *SSETransport) Start(ctx context.Context) error {
 		_ = resp.Body.Close()
 		return fmt.Errorf("mcp: expected text/event-stream, got %q", ct)
 	}
+	baseURL := req.URL
+	if resp.Request != nil && resp.Request.URL != nil {
+		baseURL = resp.Request.URL
+	}
 	t.respBody = resp.Body
-	go t.readSSE(bufio.NewReader(resp.Body))
+	go t.readSSE(bufio.NewReader(resp.Body), baseURL)
 	return nil
 }
 
-func (t *SSETransport) readSSE(r *bufio.Reader) {
+func (t *SSETransport) readSSE(r *bufio.Reader, baseURL *url.URL) {
 	for {
 		eventType, data, err := readSSEEvent(r)
 		if err != nil {
@@ -695,9 +700,14 @@ func (t *SSETransport) readSSE(r *bufio.Reader) {
 
 		// Legacy SSE transport: server sends "endpoint" event with POST URL
 		if eventType == "endpoint" {
+			endpoint, err := baseURL.Parse(data)
+			if err != nil {
+				t.dispatchError(fmt.Errorf("mcp: resolve SSE endpoint: %w", err))
+				continue
+			}
 			t.mu.Lock()
 			first := t.Endpoint == ""
-			t.Endpoint = data
+			t.Endpoint = endpoint.String()
 			t.mu.Unlock()
 			if first && t.endpointReady != nil {
 				close(t.endpointReady)
