@@ -53,6 +53,7 @@ Most use the shared `internal/openaicompat` codec (some wrappers delegate via `p
 | [Heabsy](heabsy.md)         | `api.heabsy.com`    | `HEABSY_API_KEY`, `HEABSY_BASE_URL`           |
 | [Opper](opper.md)           | `api.opper.ai`      | `OPPER_API_KEY`, `OPPER_BASE_URL`             |
 | [Runcrate](runcrate.md)     | `api.runcrate.ai`   | `RUNCRATE_API_KEY`, `RUNCRATE_BASE_URL`       |
+| [Cheaper Inference](cheaperinference.md) | `api.cheaperinference.com/v1` | `CHEAPER_INFERENCE_API_KEY`, `CHEAPER_INFERENCE_BASE_URL` |
 
 ## Local / Custom
 

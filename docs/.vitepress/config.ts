@@ -173,6 +173,7 @@ export default defineConfig({
                 { text: 'Heabsy', link: '/providers/heabsy' },
                 { text: 'Opper', link: '/providers/opper' },
                 { text: 'Runcrate', link: '/providers/runcrate' },
+                { text: 'Cheaper Inference', link: '/providers/cheaperinference' },
               ],
             },
             {
