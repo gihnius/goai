@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -99,10 +100,15 @@ func retryAfterDuration(err error) time.Duration {
 				return time.Duration(v) * time.Millisecond
 			}
 		}
-		// Standard Retry-After (seconds).
+		// Standard Retry-After (delay-seconds or HTTP-date).
 		if secs, ok := apiErr.ResponseHeaders["retry-after"]; ok {
 			if v, parseErr := strconv.ParseInt(secs, 10, 64); parseErr == nil && v > 0 {
 				return time.Duration(v) * time.Second
+			}
+			if date, parseErr := http.ParseTime(secs); parseErr == nil {
+				if delay := time.Until(date); delay > 0 {
+					return delay
+				}
 			}
 		}
 	}

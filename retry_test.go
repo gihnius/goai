@@ -687,3 +687,60 @@ type RetryInfo struct {
 	Err     error
 	Delay   time.Duration
 }
+
+func TestRetryAfterDuration_HTTPDate(t *testing.T) {
+	future := time.Now().UTC().Add(30 * time.Second).Truncate(time.Second)
+	for _, layout := range []string{http.TimeFormat, time.RFC850, time.ANSIC} {
+		t.Run(layout, func(t *testing.T) {
+			err := fmt.Errorf("wrapped: %w", &APIError{ResponseHeaders: map[string]string{"retry-after": future.Format(layout)}})
+			before := time.Until(future)
+			got := retryAfterDuration(err)
+			after := time.Until(future)
+			if got < after || got > before {
+				t.Fatalf("date delay = %v, want between %v and %v", got, after, before)
+			}
+		})
+	}
+}
+
+func TestRetryAfterDuration_HTTPDateFallbackAndPrecedence(t *testing.T) {
+	future := time.Now().UTC().Add(30 * time.Second).Format(http.TimeFormat)
+	past := time.Now().UTC().Add(-time.Hour).Format(http.TimeFormat)
+	for _, tt := range []struct {
+		name    string
+		headers map[string]string
+		message string
+		want    time.Duration
+	}{
+		{"milliseconds win", map[string]string{"retry-after-ms": "250", "retry-after": future}, "", 250 * time.Millisecond},
+		{"past date", map[string]string{"retry-after": past}, "", 0},
+		{"past date body fallback", map[string]string{"retry-after": past}, "wait 7 seconds", 7 * time.Second},
+		{"invalid date body fallback", map[string]string{"retry-after": "not a date"}, "wait 7 seconds", 7 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := retryAfterDuration(&APIError{ResponseHeaders: tt.headers, Message: tt.message})
+			if got != tt.want {
+				t.Fatalf("delay = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetryDelay_HTTPDate(t *testing.T) {
+	for _, seconds := range []int{30, 120} {
+		t.Run(fmt.Sprint(seconds), func(t *testing.T) {
+			future := time.Now().UTC().Add(time.Duration(seconds) * time.Second).Truncate(time.Second)
+			err := &APIError{ResponseHeaders: map[string]string{"retry-after-ms": "invalid", "retry-after": future.Format(http.TimeFormat)}}
+			before := time.Until(future)
+			got := retryDelay(err, 0)
+			after := time.Until(future)
+			if seconds == 30 {
+				if got < after || got > before {
+					t.Fatalf("date delay = %v, want between %v and %v", got, after, before)
+				}
+			} else if got < time.Second || got > 3*time.Second {
+				t.Fatalf("long date delay = %v, want existing 1s-3s backoff", got)
+			}
+		})
+	}
+}
